@@ -45,8 +45,10 @@ This script passes the **project name** as the first argument to `SubParsley.py`
 #### Example: `finj` (for `finj_project/`)
 ```bash
 #!/bin/bash
-# finj
-python3 /path/to/shared/SubParsley.py finj "\$@"
+export PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PROJECT_NAME="finj"
+export PROJECT_DESC="Offline Financial Journal"
+python3 /path/to/shared/SubParsley.py "$@"
 ```
 Make it executable:
 ```bash
