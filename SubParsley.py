@@ -77,6 +77,8 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley",  desc: str = "SubPars
                         }
                         if param.default is not inspect.Parameter.empty:
                             kwargs["default"] = param.default
+                        else:
+                            kwargs["required"] = True
                         if param.annotation is not inspect.Parameter.empty:
                             if param.annotation == int:
                                 kwargs["type"] = int
@@ -93,7 +95,7 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley",  desc: str = "SubPars
 
 def main():
     # --- Determine the modules directory ---
-    project_dir = Path(os.environ.get('PROJECT_DIR', Path(__file__).parent))
+    project_dir = Path(os.environ.get('PROJECT_DIR', '')) or Path(__file__).parent
     project_name = os.environ.get('PROJECT_NAME', "SubParsley")
     project_desc = os.environ.get('PROJECT_DESC', "SubParsley - Extensible CLI Tool")
         
@@ -106,7 +108,10 @@ def main():
     parser = setup_cli(project_dir, project_name, project_desc)
     args = parser.parse_args()
     try:
-        args.func(**vars(args))
+        # Filter out 'noun' and 'verb' from args before passing to the function
+        # These are used for CLI routing, not as function arguments
+        func_args = {k: v for k, v in vars(args).items() if k not in ('noun', 'verb', 'func')}
+        args.func(**func_args)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
