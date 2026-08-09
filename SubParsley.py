@@ -10,13 +10,17 @@ import sys
 import argparse
 from pathlib import Path
 
-def setup_cli(modules_dir: Path, name: str = "SubParsley",  desc: str = "SubParsley - Extensible CLI Tool"):
+def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsley - Extensible CLI Tool"):
     # Main parser
     parser = argparse.ArgumentParser(prog=name, description=desc)
     subparsers = parser.add_subparsers(dest="noun", title="Nouns", required=True)
 
     # Load all modules in the specified modules_dir
     sys.path.insert(0, str(modules_dir))
+
+    # Dictionary to collect verbs for each module
+    module_verbs = {}
+
     for module_file in modules_dir.glob("*.py"):
         if module_file.name == "__init__.py":
             continue
@@ -26,7 +30,19 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley",  desc: str = "SubPars
         except:
             continue
 
-        # Create a subparser for the noun (e.g., "trade")
+        # Collect all valid verbs for this module
+        verbs = []
+        for name, obj in inspect.getmembers(module):
+            if inspect.isfunction(obj) and not name.startswith("_"):
+                doc = inspect.getdoc(obj) or ""
+                if "@desc:" in doc and "!@desc:" not in doc:
+                    verbs.append((name, obj))
+
+        if verbs:  # Only add module if it has verbs
+            module_verbs[module_name] = (module, verbs)
+
+    # Create subparsers for modules that have verbs
+    for module_name, (module, verbs) in module_verbs.items():
         noun_parser = subparsers.add_parser(
             module_name,
             help=f"Commands for {module_name}",
@@ -37,59 +53,53 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley",  desc: str = "SubPars
             required=True,
         )
 
-        # Add subcommands for each method in the module
-        for name, obj in inspect.getmembers(module):
-            if inspect.isfunction(obj) and not name.startswith("_"):
-                # Extract metadata from docstring
-                doc = inspect.getdoc(obj) or ""
-                desc = None
-                arg_help = {}
-                for line in doc.split("\n"):
-                    line = line.strip()
-                    if "!@desc:" in line:
-                        # Skip methods annotated with `!@`
+        for name, obj in verbs:
+            # Extract metadata from docstring
+            doc = inspect.getdoc(obj) or ""
+            desc = None
+            arg_help = {}
+            for line in doc.split("\n"):
+                line = line.strip()
+                if "!@desc:" in line:
+                    continue
+                if "@desc:" in line:
+                    desc = line.split(":")[1].strip()
+                if "@arg:" in line:
+                    parts = line.split(":")[1].strip().split(" ")
+                    param_name = parts[0]
+                    help_text = " ".join(parts[1:])
+                    arg_help[param_name] = help_text
+
+            if desc:
+                verb_parser = noun_subparsers.add_parser(
+                    name,
+                    help=desc or f"{name} {module_name}",
+                    description=desc,
+                )
+
+                sig = inspect.signature(obj)
+                for param_name, param in sig.parameters.items():
+                    if param_name == "self":
                         continue
-                    if "@desc:" in line:
-                        desc = line.split(":")[1].strip()
-                    if "@arg:" in line:
-                        parts = line.split(":")[1].strip().split(" ")
-                        param_name = parts[0]
-                        help_text = " ".join(parts[1:])
-                        arg_help[param_name] = help_text
+                    arg_name = f"--{param_name.replace('_', '-')}"
+                    kwargs = {
+                        "dest": param_name,
+                        "help": arg_help.get(param_name, f"{param_name} for {module_name}"),
+                    }
+                    if param.default is not inspect.Parameter.empty:
+                        kwargs["default"] = param.default
+                    else:
+                        kwargs["required"] = True
+                    if param.annotation is not inspect.Parameter.empty:
+                        if param.annotation == int:
+                            kwargs["type"] = int
+                        elif param.annotation == float:
+                            kwargs["type"] = float
+                        elif param.annotation == bool:
+                            kwargs["action"] = "store_true"
+                    verb_parser.add_argument(arg_name, **kwargs)
 
-                if desc:
-                    # Create a subparser for the verb (e.g., "add" for add_trade)
-                    verb_parser = noun_subparsers.add_parser(
-                        name,
-                        help=desc or f"{name} {module_name}",
-                        description=desc,
-                    )
-
-                    # Add arguments based on the function signature
-                    sig = inspect.signature(obj)
-                    for param_name, param in sig.parameters.items():
-                        if param_name == "self":
-                            continue
-                        arg_name = f"--{param_name.replace('_', '-')}"
-                        kwargs = {
-                            "dest": param_name,
-                            "help": arg_help.get(param_name, f"{param_name} for {module_name}"),
-                        }
-                        if param.default is not inspect.Parameter.empty:
-                            kwargs["default"] = param.default
-                        else:
-                            kwargs["required"] = True
-                        if param.annotation is not inspect.Parameter.empty:
-                            if param.annotation == int:
-                                kwargs["type"] = int
-                            elif param.annotation == float:
-                                kwargs["type"] = float
-                            elif param.annotation == bool:
-                                kwargs["action"] = "store_true"
-                        verb_parser.add_argument(arg_name, **kwargs)
-
-                    # Set the method to call for this subcommand
-                    verb_parser.set_defaults(func=obj)
+                verb_parser.set_defaults(func=obj)
 
     return parser
 
