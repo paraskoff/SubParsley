@@ -12,29 +12,54 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Callable, Set
 
 
-def load_modules(modules_dir: Path) -> List[Tuple[str, Any]]:
+def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[Tuple[str, Any]]:
     """
-    Load all Python modules from the specified directory.
+    Recursively load all Python modules from the specified directory and its subdirectories.
 
     Args:
         modules_dir: Path to the directory containing module files
+        parent_module: Parent module name for nested modules (e.g., "subdir" for "subdir.module")
 
     Returns:
         List of tuples containing (module_name, module_object) for successfully loaded modules
+
+    Example directory structure:
+        modules/
+        ├── trade.py          # noun: trade
+        ├── portfolio.py      # noun: portfolio
+        └── analytics/
+            ├── __init__.py
+            ├── stats.py      # noun: stats
+            └── reports/
+                ├── __init__.py
+                └── monthly.py # noun: monthly
     """
     sys.path.insert(0, str(modules_dir))
     modules = []
 
+    # Load modules from current directory
     for module_file in modules_dir.glob("*.py"):
         if module_file.name == "__init__.py":
             continue
         module_name = module_file.stem
+        full_module_name = f"{parent_module}.{module_name}" if parent_module else module_name
         try:
-            module = importlib.import_module(module_name)
+            module = importlib.import_module(full_module_name)
             modules.append((module_name, module))
         except Exception:
             # Skip modules that fail to import
             continue
+
+    # Recursively load modules from subdirectories
+    for subdir in modules_dir.iterdir():
+        if subdir.is_dir() and not subdir.name.startswith("_"):
+            # Check if subdirectory has __init__.py (it's a package)
+            init_file = subdir / "__init__.py"
+            if init_file.exists():
+                sub_module_name = subdir.name
+                full_parent = f"{parent_module}.{sub_module_name}" if parent_module else sub_module_name
+                submodules = load_modules_recursive(subdir, full_parent)
+                modules.extend(submodules)
 
     return modules
 
@@ -312,8 +337,8 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsl
     parser = argparse.ArgumentParser(prog=name, description=desc)
     subparsers = parser.add_subparsers(dest="noun", title="Nouns", required=True)
 
-    # Load all modules and filter those with valid verbs
-    modules = load_modules(modules_dir)
+    # Load all modules (including from subdirectories) and filter those with valid verbs
+    modules = load_modules_recursive(modules_dir)
 
     for module_name, module in modules:
         verbs = get_valid_verbs(module)
