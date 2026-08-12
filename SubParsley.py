@@ -29,10 +29,10 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[T
         ├── portfolio.py      # noun: portfolio
         └── analytics/
             ├── __init__.py
-            ├── stats.py      # noun: stats
+            ├── stats.py      # noun: analytics.stats
             └── reports/
                 ├── __init__.py
-                └── monthly.py # noun: monthly
+                └── monthly.py # noun: analytics.reports.monthly
     """
     sys.path.insert(0, str(modules_dir))
     modules = []
@@ -42,10 +42,12 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[T
         if module_file.name == "__init__.py":
             continue
         module_name = module_file.stem
+        # Use parent_module prefix for nested modules
         full_module_name = f"{parent_module}.{module_name}" if parent_module else module_name
         try:
             module = importlib.import_module(full_module_name)
-            modules.append((module_name, module))
+            # Return the full module name (including parent) as the noun name
+            modules.append((full_module_name, module))
         except Exception:
             # Skip modules that fail to import
             continue
