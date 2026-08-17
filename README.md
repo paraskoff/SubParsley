@@ -102,6 +102,7 @@ def list():
 Use the following annotations in your method docstrings to customize the CLI:
 |Annotation|Purpose|Example|
 |---|---|---|
+| `# @ns:` | Command namespace | `# @ns: portfolio` |
 | `# @desc:` | Command description | `# @desc: Add a new trade to the system.` |
 | `# @arg:` | Argument help text | `# @arg: symbol The stock symbol (e.g., AAPL).` |
 

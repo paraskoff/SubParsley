@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ SubParsley
     A lightweight, extensible, and reusable CLI framework for Python projects
+    with support for custom noun namespaces via @ns: comment annotation.
 """
 
 import os
@@ -10,7 +11,6 @@ import sys
 import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Callable, Set
-
 
 def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[Tuple[str, Any]]:
     """
@@ -22,17 +22,6 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[T
 
     Returns:
         List of tuples containing (module_name, module_object) for successfully loaded modules
-
-    Example directory structure:
-        modules/
-        ├── trade.py          # noun: trade
-        ├── portfolio.py      # noun: portfolio
-        └── analytics/
-            ├── __init__.py
-            ├── stats.py      # noun: analytics.stats
-            └── reports/
-                ├── __init__.py
-                └── monthly.py # noun: analytics.reports.monthly
     """
     sys.path.insert(0, str(modules_dir))
     modules = []
@@ -46,16 +35,14 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[T
         full_module_name = f"{parent_module}.{module_name}" if parent_module else module_name
         try:
             module = importlib.import_module(full_module_name)
-            # Return the full module name (including parent) as the noun name
             modules.append((full_module_name, module))
-        except Exception:
-            # Skip modules that fail to import
+        except Exception as e:
+            print(e)
             continue
 
     # Recursively load modules from subdirectories
     for subdir in modules_dir.iterdir():
         if subdir.is_dir() and not subdir.name.startswith("_"):
-            # Check if subdirectory has __init__.py (it's a package)
             init_file = subdir / "__init__.py"
             if init_file.exists():
                 sub_module_name = subdir.name
@@ -65,21 +52,23 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[T
 
     return modules
 
-def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, str]]:
+def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, str], Optional[str]]:
     """
-    Extract description and argument help from a function's docstring.
+    Extract description, argument help, and custom namespace from a function's docstring.
 
     Args:
         func: The function to extract metadata from
 
     Returns:
-        Tuple of (description, arg_help_dict) where:
+        Tuple of (description, arg_help_dict, namespace) where:
         - description: The description text from @desc: annotation, or None
         - arg_help_dict: Dictionary mapping parameter names to help text from @arg: annotations
+        - namespace: The custom namespace from @ns: annotation, or None
     """
     doc = inspect.getdoc(func) or ""
     desc = None
     arg_help = {}
+    namespace = None
 
     for line in doc.split("\n"):
         line = line.strip()
@@ -94,8 +83,10 @@ def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, 
             param_name = parts[0]
             help_text = " ".join(parts[1:])
             arg_help[param_name] = help_text
+        if "@ns:" in line:
+            namespace = line.split(":")[1].strip()
 
-    return desc, arg_help
+    return desc, arg_help, namespace
 
 def generate_base_short_name(param_name: str) -> str:
     """
@@ -143,14 +134,6 @@ def generate_unique_short_name(param_name: str, used_short_names: Set[str]) -> O
 
     Returns:
         A unique short name, or None if no valid short name can be generated
-
-    Examples:
-        - For parameters: spec_file, spec_dir
-          - spec_file -> 'sf' (base from 'spec' + 'file')
-          - spec_dir -> 'sd' (base from 'spec' + 'dir')
-        - If collision occurs (e.g., both generate 's'):
-          - First: 's'
-          - Second: 'sp' (adds more characters until unique)
     """
     base = generate_base_short_name(param_name)
     if not base:
@@ -162,7 +145,6 @@ def generate_unique_short_name(param_name: str, used_short_names: Set[str]) -> O
         return base
 
     # If not unique, try adding more characters from the parameter name
-    # Remove underscores and use the full name
     clean_name = param_name.replace('_', '')
 
     # Try progressively longer prefixes
@@ -179,26 +161,29 @@ def generate_unique_short_name(param_name: str, used_short_names: Set[str]) -> O
 
     return None
 
-def get_valid_verbs(module: Any) -> List[Tuple[str, Callable, Optional[str], Dict[str, str]]]:
+def get_valid_verbs(
+    module: Any,
+    default_namespace: str
+) -> List[Tuple[str, Callable, Optional[str], Dict[str, str], str]]:
     """
-    Get all valid verb functions from a module.
-
-    A valid verb is a non-private function with a @desc: annotation (and not !@desc:).
+    Get all valid verb functions from a module with their effective namespace.
 
     Args:
         module: The module to scan for verb functions
+        default_namespace: The default namespace (module name) to use if @ns: is not specified
 
     Returns:
-        List of tuples containing (function_name, function_object, description, arg_help)
-        for all valid verb functions in the module
+        List of tuples containing (function_name, function_object, description, arg_help, effective_namespace)
     """
     verbs = []
 
     for name, obj in inspect.getmembers(module):
         if inspect.isfunction(obj) and not name.startswith("_"):
-            desc, arg_help = extract_function_metadata(obj)
+            desc, arg_help, custom_ns = extract_function_metadata(obj)
             if desc:
-                verbs.append((name, obj, desc, arg_help))
+                # Use custom namespace from @ns: annotation, or fall back to default
+                effective_ns = custom_ns if custom_ns else default_namespace
+                verbs.append((name, obj, desc, arg_help, effective_ns))
 
     return verbs
 
@@ -290,7 +275,7 @@ def _get_type_converter(annotation: type) -> Optional[Callable]:
 
 def create_noun_parser(
     subparsers: Any,
-    module_name: str,
+    noun_name: str,
     verbs: List[Tuple[str, Callable, Optional[str], Dict[str, str]]]
 ) -> Any:
     """
@@ -298,15 +283,12 @@ def create_noun_parser(
 
     Args:
         subparsers: The main subparsers object
-        module_name: Name of the noun (module)
+        noun_name: Name of the noun (module)
         verbs: List of verb tuples from get_valid_verbs()
-
-    Returns:
-        The configured noun parser
     """
     noun_parser = subparsers.add_parser(
-        module_name,
-        help=f"Commands for {module_name}",
+        noun_name,
+        help=f"Commands for {noun_name}",
     )
 
     noun_subparsers = noun_parser.add_subparsers(
@@ -317,7 +299,7 @@ def create_noun_parser(
 
     # Add all valid verbs as subcommands
     for verb_name, func, desc, arg_help in verbs:
-        create_verb_parser(noun_subparsers, verb_name, func, desc, arg_help, module_name)
+        create_verb_parser(noun_subparsers, verb_name, func, desc, arg_help, noun_name)
 
     return noun_parser
 
@@ -325,27 +307,33 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsl
     """
     Set up the CLI with all nouns and verbs from the modules directory.
 
-    Only modules that contain at least one valid verb function will be registered as nouns.
+    Nouns can be:
+    - Explicitly set via @ns: comment annotation in function docstring
+    - Default to the module name if @ns: is not used
 
-    Args:
-        modules_dir: Path to the directory containing module files
-        name: Name of the CLI program
-        desc: Description of the CLI program
-
-    Returns:
-        The configured ArgumentParser
+    Multiple modules can contribute verbs to the same noun via @ns:.
     """
     # Main parser
     parser = argparse.ArgumentParser(prog=name, description=desc)
     subparsers = parser.add_subparsers(dest="noun", title="Nouns", required=True)
 
-    # Load all modules (including from subdirectories) and filter those with valid verbs
+    # Load all modules (including from subdirectories)
     modules = load_modules_recursive(modules_dir)
 
+    # Group verbs by their effective namespace
+    # Structure: {noun_name: [(verb_name, func, desc, arg_help), ...]}
+    nouns: Dict[str, List[Tuple[str, Callable, Optional[str], Dict[str, str]]]] = {}
+
     for module_name, module in modules:
-        verbs = get_valid_verbs(module)
-        if verbs:  # Only create noun parser if module has at least one verb
-            create_noun_parser(subparsers, module_name, verbs)
+        verbs = get_valid_verbs(module, module_name)
+        for verb_name, func, verb_desc, arg_help, effective_ns in verbs:
+            if effective_ns not in nouns:
+                nouns[effective_ns] = []
+            nouns[effective_ns].append((verb_name, func, verb_desc, arg_help))
+
+    # Create noun parsers for each noun that has verbs
+    for noun_name, noun_verbs in nouns.items():
+        create_noun_parser(subparsers, noun_name, noun_verbs)
 
     return parser
 
