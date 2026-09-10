@@ -77,14 +77,18 @@ def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, 
             desc = None
             break
         if "@desc:" in line:
-            desc = line.split(":")[1].strip()
+            # split(":", 1): a colon inside the description text itself must
+            # survive. A plain split(":") silently drops everything after the
+            # SECOND colon, e.g. "@desc: Render a note: fill placeholders" was
+            # truncated to "Render a note".
+            desc = line.split(":", 1)[1].strip()
         if "@arg:" in line:
-            parts = line.split(":")[1].strip().split(" ")
+            parts = line.split(":", 1)[1].strip().split(" ")
             param_name = parts[0]
             help_text = " ".join(parts[1:])
             arg_help[param_name] = help_text
         if "@ns:" in line:
-            namespace = line.split(":")[1].strip()
+            namespace = line.split(":", 1)[1].strip()
 
     return desc, arg_help, namespace
 
@@ -241,8 +245,10 @@ def create_verb_parser(
             if type_converter:
                 kwargs["type"] = type_converter
             elif param.annotation == bool:
-                # For boolean flags, use store_true action
-                kwargs["action"] = "store_true"
+                # BooleanOptionalAction, not store_true: store_true can only ever
+                # turn a flag ON, so a bool parameter DEFAULTING TO True had no way
+                # to be turned off. This gives both --flag and --no-flag.
+                kwargs["action"] = argparse.BooleanOptionalAction
 
         # Add both short and long argument names
         if short_name:
@@ -270,7 +276,7 @@ def _get_type_converter(annotation: type) -> Optional[Callable]:
     elif annotation == float:
         return float
     elif annotation == bool:
-        return None  # bool is handled by store_true action
+        return None  # bool is handled by BooleanOptionalAction, not a type converter
     return None
 
 def create_noun_parser(
@@ -303,6 +309,22 @@ def create_noun_parser(
 
     return noun_parser
 
+class ArgumentError(Exception):
+    """Raised instead of argparse's own sys.exit(2) on a parse failure, so
+    main() can report it through the same `Error: ...` / exit(1) path as every
+    other failure in this framework."""
+
+
+class DyingArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that raises on a parse error instead of printing argparse's
+    usage text and calling sys.exit(2) directly. A bad --price value or an
+    unrecognized flag used to bypass the framework's own error convention
+    entirely; this routes it through the same one."""
+
+    def error(self, message):
+        raise ArgumentError(message)
+
+
 def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsley - Extensible CLI Tool") -> Any:
     """
     Set up the CLI with all nouns and verbs from the modules directory.
@@ -314,7 +336,7 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsl
     Multiple modules can contribute verbs to the same noun via @ns:.
     """
     # Main parser
-    parser = argparse.ArgumentParser(prog=name, description=desc)
+    parser = DyingArgumentParser(prog=name, description=desc)
     subparsers = parser.add_subparsers(dest="noun", title="Nouns", required=True)
 
     # Load all modules (including from subdirectories)
@@ -350,8 +372,10 @@ def main():
 
     # --- Set up and run the CLI ---
     parser = setup_cli(project_dir, project_name, project_desc)
-    args = parser.parse_args()
     try:
+        # parse_args() is inside the try too: a missing/invalid argument must
+        # exit 1 through this same message, not argparse's own exit(2).
+        args = parser.parse_args()
         # Filter out 'noun' and 'verb' from args before passing to the function
         # These are used for CLI routing, not as function arguments
         func_args = {k: v for k, v in vars(args).items() if k not in ('noun', 'verb', 'func')}

@@ -105,6 +105,56 @@ Use the following annotations in your method docstrings to customize the CLI:
 | `# @ns:` | Command namespace | `# @ns: portfolio` |
 | `# @desc:` | Command description | `# @desc: Add a new trade to the system.` |
 | `# @arg:` | Argument help text | `# @arg: symbol The stock symbol (e.g., AAPL).` |
+| `# !@desc:` | Suppress the method from the CLI entirely | `# !@desc:` (on its own line, anywhere in the docstring) |
+
+A tag is matched as a **substring anywhere in the line** — not just at the start
+— so a docstring paragraph that happens to mention `@desc:` in prose is parsed
+as an annotation too. Keep tag lines on their own line.
+
+The leading `#` shown above is a convention, not a requirement: `@ns:`,
+`@desc:` and `@arg:` are recognized with or without it, since the parser only
+checks for the substring.
+
+## **Behavior consumers must design around**
+
+These are load-bearing facts about how SubParsley turns a function signature
+into a CLI. They are not obvious from the annotation table above, and a
+consumer that assumes otherwise will design something that breaks.
+
+- **Type annotations drive real argparse behavior, not just help text.**
+  `int` and `float` parameters get an argparse `type=` converter, so
+  `shares: float` means a non-numeric `--shares` value is rejected before your
+  function ever runs. `bool` parameters become `argparse.BooleanOptionalAction`,
+  giving both `--flag` and `--no-flag` regardless of the parameter's default.
+  A consumer that re-validates or re-converts these itself is doing
+  redundant work — the value SubParsley hands your function is already the
+  right type.
+- **Every parameter is a single, optional, scalar flag.** There are no
+  positional arguments, no `nargs`, and no `action="append"`. A repeatable or
+  list-valued argument (`--tag foo --tag bar`) **cannot be expressed** — model
+  it instead as one delimited string (`--tags "foo,bar"`) or a path to a file,
+  and parse that yourself.
+- **Short flags are derived from parameter names, and order matters.**
+  `generate_unique_short_name` takes the first letter of each word in the
+  parameter name (`spec_path` → `sp`), and on a collision walks progressively
+  longer prefixes of the *next* parameter that collided. Collisions are
+  resolved **per verb**, not across the whole CLI, but within one verb the
+  **declaration order of your parameters decides which one keeps the short
+  form** — reordering a signature can silently change `-s` from meaning
+  `sector` to meaning `status`.
+- **A missing or malformed argument now exits 1 with `Error: ...`**, the same
+  convention every other failure in a SubParsley-based CLI uses — not
+  argparse's own usage banner and exit code 2. This is implemented by
+  `DyingArgumentParser`, which raises `ArgumentError` from `error()` instead of
+  calling `sys.exit()` directly; `main()` catches it alongside every other
+  exception.
+- **Modules are auto-discovered, and the discovery rule is easy to trip on.**
+  `load_modules_recursive` imports every `*.py` directly in the project
+  directory, then recurses into a subdirectory **only if it contains an
+  `__init__.py` and its name does not start with `_`**. A new subpackage with
+  no `__init__.py` registers nothing, silently. A module that raises on import
+  is skipped with a bare `print(e)` and the CLI continues without it — check
+  your terminal output if a command you just added does not appear.
 
 
 ### Usage Examples
@@ -219,6 +269,10 @@ Check that the module and method names are correct and that the module is in the
 
 - **Error: Missing arguments**:
 Ensure required arguments are provided. Use `--help` to see the expected arguments for a command.
+
+- **A bad value exits with `Error: ...` and status 1** (not argparse's own usage
+  banner and exit code 2): this is deliberate, so scripts driving a
+  SubParsley-based CLI can check `$?` the same way for every kind of failure.
 
 
 ## License
