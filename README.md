@@ -148,6 +148,11 @@ consumer that assumes otherwise will design something that breaks.
   `DyingArgumentParser`, which raises `ArgumentError` from `error()` instead of
   calling `sys.exit()` directly; `main()` catches it alongside every other
   exception.
+- **A colon in `@desc:`/`@arg:`/`@ns:` text is now legal.** Tag text used to be
+  taken as `line.split(":")[1]`, so `@desc: Render a note: fill placeholders`
+  silently lost everything after the second colon. It is now
+  `line.split(":", 1)`, so a colon anywhere in the description or an argument's
+  help text survives.
 - **Modules are auto-discovered, and the discovery rule is easy to trip on.**
   `load_modules_recursive` imports every `*.py` directly in the project
   directory, then recurses into a subdirectory **only if it contains an
