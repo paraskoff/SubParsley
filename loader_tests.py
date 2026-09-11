@@ -52,6 +52,27 @@ class IgnorePatternTests(LoaderTestCase):
         self.assertNotIn("tests", loaded)
         self.assertNotIn("conftest", loaded)
 
+    def test__dunder_main_is_skipped(self):
+        """Verify __main__.py is never imported. import_module("__main__") returns
+        the already-running entry module — SubParsley itself — whose docstrings
+        mention `@desc:` and `@ns:` while documenting them, so it registers its own
+        internals as verbs. A consumer hit this by adding a console-script entry
+        point inside its package."""
+        self.tree({"__main__.py": "X = 1\n"})
+        self.assertNotIn("__main__", self.names())
+
+    def test__a_consumer_entry_point_does_not_publish_framework_internals(self):
+        """Verify the end-to-end symptom is gone: no noun named __main__, and none
+        of SubParsley's own function docstrings become commands."""
+        self.tree({
+            "__main__.py": "def main():\n    return 0\n",
+            "real.py": self.verb("A real command", ns="real"),
+        })
+        with sandboxed_imports():
+            parser = sp.setup_cli(self.root)
+        nouns = set(parser._subparsers._group_actions[0].choices)
+        self.assertEqual(nouns, {"real"})
+
     def test__innocent_names_are_not_caught(self):
         """Verify `*_test*.py` does not over-match. `manifest.py` and `latest.py`
         both contain the substring 'test' and must still load."""

@@ -22,7 +22,13 @@ from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
 # invocation, plus unittest itself, before argparse is even constructed. Worse,
 # any module-level side effect in a test file would run during a user's
 # ordinary command.
-DEFAULT_IGNORE = ("*_test*.py", "tests.py", "conftest.py", "setup.py")
+# `__main__.py` is not merely uninteresting, it is actively harmful:
+# importlib.import_module("__main__") returns the ALREADY-RUNNING entry module —
+# SubParsley itself. This module's own docstrings mention `@desc:` and `@ns:`
+# while documenting them, so they parse as real annotations and SubParsley
+# registers its own internals as CLI verbs. Found when a consumer added a
+# `__main__.py` console-script entry point inside its package.
+DEFAULT_IGNORE = ("*_test*.py", "tests.py", "conftest.py", "setup.py", "__main__.py")
 
 IGNORE_ENV_VAR = "PROJECT_IGNORE"
 IGNORE_DEFAULTS_ENV_VAR = "PROJECT_IGNORE_DEFAULTS"
