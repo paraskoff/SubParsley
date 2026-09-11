@@ -14,6 +14,7 @@ import re
 import traceback
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from pathlib import Path
 from types import UnionType
 from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
@@ -509,6 +510,13 @@ def create_verb_parser(
             type_converter = _get_type_converter(param.annotation)
             if type_converter:
                 kwargs["type"] = type_converter
+                unwrapped = _unwrap_optional(param.annotation)
+                if (isinstance(unwrapped, type) and issubclass(unwrapped, Enum)
+                        and not kwargs.get("choices")):
+                    # Show the accepted values in --help. metavar rather than
+                    # choices=: argparse would compare the CONVERTED value
+                    # (a member) against the strings and reject everything.
+                    kwargs["metavar"] = "{" + ",".join(enum_choices(unwrapped)) + "}"
                 if kwargs.get("choices"):
                     # argparse compares the CONVERTED value against choices, so
                     # `choices=1|2` on an int parameter must hold ints, not "1".
@@ -518,6 +526,11 @@ def create_verb_parser(
                 # turn a flag ON, so a bool parameter DEFAULTING TO True had no way
                 # to be turned off. This gives both --flag and --no-flag.
                 kwargs["action"] = argparse.BooleanOptionalAction
+
+        if kwargs.get("choices") and "type" not in kwargs:
+            # A plain str parameter with declared choices: fold case so the
+            # declared spelling is what reaches the function.
+            kwargs["type"] = _canonical_choice(kwargs["choices"])
 
         # Add both short and long argument names. A short-flag clash must
         # degrade to "no short flag", never to "no CLI": add_argument raises
@@ -567,6 +580,59 @@ def _decimal_arg(raw) -> Decimal:
     return value
 
 
+def _enum_arg(enum_cls) -> Callable:
+    """ argparse `type=` converter for an Enum parameter.
+
+        Users type the VALUE (`BUY`), not the member name, because the value is
+        what the domain calls it and what ends up in the data. Without this an
+        Enum-annotated parameter silently arrived as a raw string, which then
+        never compared equal to any member — the same class of bug as
+        finj's `TxAction` comparison, which once inverted every BUY into a SELL.
+
+        Raises ArgumentTypeError so argparse uses the message verbatim rather
+        than falling back to "invalid <converter name> value".
+    """
+    by_value = {str(member.value): member for member in enum_cls}
+
+    def convert(raw):
+        try:
+            return by_value[str(raw)]
+        except KeyError:
+            allowed = ", ".join(sorted(by_value))
+            raise argparse.ArgumentTypeError(
+                f"{raw!r} is not one of: {allowed}") from None
+
+    convert.__name__ = enum_cls.__name__
+    return convert
+
+
+def enum_choices(enum_cls) -> List[str]:
+    """The values an Enum parameter accepts, for `choices`/metavar display."""
+    return [str(member.value) for member in enum_cls]
+
+
+def _canonical_choice(choices: List[str]) -> Callable:
+    """ Match a `choices=` value case-insensitively and return the declared spelling.
+
+        argparse applies `type=` before checking `choices`, so this is where
+        case-folding has to happen. It matters because every consumer parameter
+        that gained `choices` was ALREADY case-insensitive — normalised with
+        .upper() or .lower() somewhere downstream — and a case-sensitive
+        `choices` would have silently broken `--action buy`, which worked for
+        years.
+
+        An unrecognised value is returned unchanged so argparse's own `choices`
+        check produces the error, listing the valid values.
+    """
+    canonical = {c.casefold(): c for c in choices}
+
+    def convert(raw):
+        return canonical.get(str(raw).casefold(), raw)
+
+    convert.__name__ = "choice"
+    return convert
+
+
 def _unwrap_optional(annotation):
     """ Reduce `Optional[X]` / `X | None` to `X`.
 
@@ -601,6 +667,8 @@ def _get_type_converter(annotation: type) -> Optional[Callable]:
         return float
     elif annotation is Decimal:
         return _decimal_arg
+    elif isinstance(annotation, type) and issubclass(annotation, Enum):
+        return _enum_arg(annotation)
     elif annotation is bool:
         return None  # bool is handled by BooleanOptionalAction, not a type converter
     return None

@@ -2,6 +2,7 @@
 import argparse
 import unittest
 from decimal import Decimal
+from enum import Enum
 from typing import Optional
 
 import SubParsley as sp
@@ -132,6 +133,91 @@ class OptionalUnwrappingTests(unittest.TestCase):
         self.assertIs(sp._get_type_converter(int), int)
         self.assertIs(sp._get_type_converter(float), float)
         self.assertIsNone(sp._get_type_converter(str))
+
+
+class EnumConverterTests(unittest.TestCase):
+    """Testing Enum-annotated parameters.
+
+    Without a converter an Enum parameter silently arrived as a raw string,
+    which then never compared equal to any member — the bug class that once
+    inverted every BUY into a SELL in the consumer's ledger.
+    """
+
+    class Action(Enum):
+        BUY = "BUY"
+        SELL = "SELL"
+
+    def verb(self):
+        def f(action: EnumConverterTests.Action = None):
+            """
+            @desc: Do a trade
+            @arg: action Trade action
+            """
+        return f
+
+    def test__an_enum_annotation_gets_a_converter(self):
+        """Verify Enum is recognised at all."""
+        self.assertIsNotNone(sp._get_type_converter(self.Action))
+
+    def test__the_value_converts_to_the_member(self):
+        """Verify users type the VALUE, which is what the domain calls it and what
+        ends up in the data — not the member name."""
+        args = build(self.verb()).parse_args(["demo", "run", "--action", "BUY"])
+        self.assertIs(args.action, self.Action.BUY)
+
+    def test__an_invalid_value_is_refused_listing_the_valid_ones(self):
+        """Verify a typo is self-correcting rather than silently passed through."""
+        with self.assertRaises(sp.ArgumentError) as cm:
+            build(self.verb()).parse_args(["demo", "run", "--action", "SIDEWAYS"])
+        self.assertIn("BUY, SELL", str(cm.exception))
+
+    def test__the_accepted_values_appear_in_help(self):
+        """Verify --help advertises them, so the CLI is discoverable."""
+        verb = (build(self.verb())._subparsers._group_actions[0].choices["demo"]
+                ._subparsers._group_actions[0].choices["run"])
+        self.assertIn("{BUY,SELL}", verb.format_help())
+
+    def test__optional_enum_converts_too(self):
+        """Verify the Optional wrapper does not lose the converter."""
+        self.assertIsNotNone(sp._get_type_converter(Optional[self.Action]))
+
+    def test__enum_choices_lists_values_not_names(self):
+        """Verify the helper reports what a user actually types."""
+        self.assertEqual(sp.enum_choices(self.Action), ["BUY", "SELL"])
+
+
+class ExplicitChoicesTests(unittest.TestCase):
+    """Testing `choices=` in the bracketed @arg: spec"""
+
+    def test__a_valid_choice_is_accepted(self):
+        """Verify the ordinary path."""
+        def f(kind: str = "supplement"):
+            """
+            @desc: Start a protocol
+            @arg: kind [choices=supplement|fitness|nutrition] Protocol kind
+            """
+        args = build(f).parse_args(["demo", "run", "--kind", "fitness"])
+        self.assertEqual(args.kind, "fitness")
+
+    def test__an_invalid_choice_is_refused(self):
+        """Verify argparse rejects it before the dispatcher runs."""
+        def f(kind: str = "supplement"):
+            """
+            @desc: Start a protocol
+            @arg: kind [choices=supplement|fitness] Protocol kind
+            """
+        with self.assertRaises(sp.ArgumentError):
+            build(f).parse_args(["demo", "run", "--kind", "nonsense"])
+
+    def test__choices_are_converted_with_the_parameter_type(self):
+        """Verify `choices=1|2` on an int holds ints. argparse compares the
+        CONVERTED value, so string choices would reject every input."""
+        def f(level: int = 1):
+            """
+            @desc: Set a level
+            @arg: level [choices=1|2|3] Level
+            """
+        self.assertEqual(build(f).parse_args(["demo", "run", "--level", "2"]).level, 2)
 
 
 if __name__ == "__main__":
