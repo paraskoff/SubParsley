@@ -211,6 +211,13 @@ def generate_base_short_name(param_name: str) -> str:
 
     return ""
 
+# argparse registers -h itself, and add_argument("-h", ...) raises at PARSER
+# CONSTRUCTION time — so a consumer parameter whose initials produce "h"
+# (host, hours, header) would take down the entire CLI, not just one verb.
+# No current kolobar parameter produces it, which makes reserving it free.
+RESERVED_SHORT_NAMES = frozenset({"h"})
+
+
 def generate_unique_short_name(param_name: str, used_short_names: Set[str]) -> Optional[str]:
     """
     Generate a unique short argument name from a parameter name.
@@ -267,7 +274,13 @@ def get_valid_verbs(
     verbs = []
 
     for name, obj in inspect.getmembers(module):
-        if inspect.isfunction(obj) and not name.startswith("_"):
+        # `obj.__module__ == module.__name__` keeps a RE-IMPORTED function from
+        # registering a second time: `from helpers import render`, where render
+        # carries @desc:, would otherwise publish a phantom verb in the
+        # importing module's namespace too. kolobar has zero such cases today
+        # (36 generated verbs == 36 local defs), so this is free hardening.
+        if (inspect.isfunction(obj) and not name.startswith("_")
+                and obj.__module__ == module.__name__):
             desc, arg_help, custom_ns = extract_function_metadata(obj)
             if desc:
                 # Use custom namespace from @ns: annotation, or fall back to default
@@ -332,7 +345,7 @@ def create_verb_parser(
 
     # Add arguments based on the function signature
     sig = inspect.signature(func)
-    used_short_names: Set[str] = set()
+    used_short_names: Set[str] = set(RESERVED_SHORT_NAMES)
 
     for param_name, param in sig.parameters.items():
         if param_name == "self":
@@ -361,11 +374,18 @@ def create_verb_parser(
                 # to be turned off. This gives both --flag and --no-flag.
                 kwargs["action"] = argparse.BooleanOptionalAction
 
-        # Add both short and long argument names
+        # Add both short and long argument names. A short-flag clash must
+        # degrade to "no short flag", never to "no CLI": add_argument raises
+        # ArgumentError at construction time, which would abort the whole
+        # parser build rather than this one option.
         if short_name:
-            verb_parser.add_argument(f"-{short_name}", long_name, **kwargs)
-        else:
-            verb_parser.add_argument(long_name, **kwargs)
+            try:
+                verb_parser.add_argument(f"-{short_name}", long_name, **kwargs)
+                continue
+            except argparse.ArgumentError as e:
+                print(f"Warning: {module_name} {verb_name}: dropping short flag "
+                      f"-{short_name} for --{param_name}: {e}", file=sys.stderr)
+        verb_parser.add_argument(long_name, **kwargs)
 
     # Set the method to call for this subcommand
     verb_parser.set_defaults(func=func)
