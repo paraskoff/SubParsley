@@ -11,8 +11,11 @@ import inspect
 import sys
 import argparse
 import traceback
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple, Optional, Any, Callable, Set
+from types import UnionType
+from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
+                    Union, get_args, get_origin)
 
 # Never imported as dispatcher modules. Test code contributes no verbs, and in
 # kolobar it is 55 of 122 .py files — 45% of every import on every CLI
@@ -368,7 +371,7 @@ def create_verb_parser(
             type_converter = _get_type_converter(param.annotation)
             if type_converter:
                 kwargs["type"] = type_converter
-            elif param.annotation == bool:
+            elif _unwrap_optional(param.annotation) is bool:
                 # BooleanOptionalAction, not store_true: store_true can only ever
                 # turn a flag ON, so a bool parameter DEFAULTING TO True had no way
                 # to be turned off. This gives both --flag and --no-flag.
@@ -392,6 +395,48 @@ def create_verb_parser(
 
     return verb_parser
 
+def _decimal_arg(raw) -> Decimal:
+    """ argparse `type=` converter for a Decimal parameter.
+
+        Built from the RAW STRING argparse hands us, never via float. That is the
+        entire point: a float has already destroyed information by the time you
+        see it, and `--price 1234567890123456789.05` cannot be recovered from one.
+
+        Raises ValueError, not decimal.InvalidOperation. argparse._get_value
+        catches only ArgumentTypeError, TypeError and ValueError, so an
+        InvalidOperation would escape as a raw traceback instead of going through
+        DyingArgumentParser -> ArgumentError -> the framework's `Error: ...` path.
+
+        Non-finite values are rejected: `Decimal("nan")` parses happily, and
+        `--shares nan` would post a NaN row that compares False against
+        everything downstream, including itself.
+    """
+    try:
+        value = Decimal(str(raw).strip())
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid decimal value: {raw!r}") from exc
+    if not value.is_finite():
+        raise ValueError(f"invalid decimal value: {raw!r}")
+    return value
+
+
+def _unwrap_optional(annotation):
+    """ Reduce `Optional[X]` / `X | None` to `X`.
+
+        A prerequisite, not a nicety. Consumers write `target_dir: str = None`
+        today; the moment those are corrected to the accurate `Optional[str]`,
+        an unwrapping-free lookup silently stops matching and `Optional[int]`
+        loses its converter — turning a validated number back into a string with
+        no error anywhere.
+    """
+    origin = get_origin(annotation)
+    if origin is Union or origin is UnionType:
+        args = [a for a in get_args(annotation) if a is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return annotation
+
+
 def _get_type_converter(annotation: type) -> Optional[Callable]:
     """
     Get the appropriate type converter for argparse based on parameter annotation.
@@ -402,13 +447,17 @@ def _get_type_converter(annotation: type) -> Optional[Callable]:
     Returns:
         The appropriate type converter function, or None if no conversion needed
     """
-    if annotation == int:
+    annotation = _unwrap_optional(annotation)
+    if annotation is int:
         return int
-    elif annotation == float:
+    elif annotation is float:
         return float
-    elif annotation == bool:
+    elif annotation is Decimal:
+        return _decimal_arg
+    elif annotation is bool:
         return None  # bool is handled by BooleanOptionalAction, not a type converter
     return None
+
 
 def create_noun_parser(
     subparsers: Any,
