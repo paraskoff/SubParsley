@@ -1,4 +1,5 @@
 """Tests for annotation-driven argparse type conversion."""
+import argparse
 import unittest
 from decimal import Decimal
 from typing import Optional
@@ -27,17 +28,31 @@ class DecimalConverterTests(unittest.TestCase):
         self.assertEqual(sp._decimal_arg(raw), Decimal(raw))
         self.assertNotEqual(Decimal(str(float(raw))), Decimal(raw))
 
-    def test__garbage_raises_ValueError_not_InvalidOperation(self):
+    def test__garbage_raises_ArgumentTypeError_not_InvalidOperation(self):
         """Verify the exception type. argparse._get_value catches only
         ArgumentTypeError, TypeError and ValueError, so an InvalidOperation would
         escape as a raw traceback instead of the framework's `Error: ...` path."""
-        with self.assertRaises(ValueError):
+        with self.assertRaises(argparse.ArgumentTypeError):
             sp._decimal_arg("abc")
+
+    def test__the_error_message_does_not_leak_the_converter_name(self):
+        """Verify the user sees the value, not an internal function name. argparse
+        uses an ArgumentTypeError's message verbatim, whereas a ValueError falls
+        back to `invalid _decimal_arg value: 'abc'`."""
+        def f(price: Decimal = Decimal(0)):
+            """
+            @desc: Set a price
+            @arg: price Price
+            """
+        with self.assertRaises(sp.ArgumentError) as cm:
+            build(f).parse_args(["demo", "run", "--price", "abc"])
+        self.assertIn("is not a decimal number", str(cm.exception))
+        self.assertNotIn("_decimal_arg", str(cm.exception))
 
     def test__nan_and_infinity_are_rejected(self):
         """Verify --shares nan cannot post a NaN row."""
         for value in ("nan", "Infinity", "-Infinity"):
-            with self.assertRaises(ValueError, msg=value):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
                 sp._decimal_arg(value)
 
     def test__a_bad_value_goes_through_the_frameworks_error_path(self):

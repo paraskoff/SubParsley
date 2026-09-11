@@ -402,10 +402,15 @@ def _decimal_arg(raw) -> Decimal:
         entire point: a float has already destroyed information by the time you
         see it, and `--price 1234567890123456789.05` cannot be recovered from one.
 
-        Raises ValueError, not decimal.InvalidOperation. argparse._get_value
+        Raises ArgumentTypeError, not decimal.InvalidOperation. argparse._get_value
         catches only ArgumentTypeError, TypeError and ValueError, so an
         InvalidOperation would escape as a raw traceback instead of going through
         DyingArgumentParser -> ArgumentError -> the framework's `Error: ...` path.
+
+        ArgumentTypeError specifically, rather than ValueError, because argparse
+        uses its message verbatim. A ValueError falls back to the generic
+        "invalid <converter.__name__> value: ...", which leaks the internal
+        function name to the user.
 
         Non-finite values are rejected: `Decimal("nan")` parses happily, and
         `--shares nan` would post a NaN row that compares False against
@@ -414,9 +419,9 @@ def _decimal_arg(raw) -> Decimal:
     try:
         value = Decimal(str(raw).strip())
     except InvalidOperation as exc:
-        raise ValueError(f"invalid decimal value: {raw!r}") from exc
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a decimal number") from exc
     if not value.is_finite():
-        raise ValueError(f"invalid decimal value: {raw!r}")
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a finite decimal number")
     return value
 
 
