@@ -220,5 +220,81 @@ class ImportFailureTests(LoaderTestCase):
             self.load(on_error=lambda n, e: None)
 
 
+class PackageLoaderTests(LoaderTestCase):
+    """Testing PROJECT_PACKAGE: importing by package name, not by directory.
+
+    The directory path has to put PROJECT_DIR on sys.path, which for an
+    INSTALLED consumer means inserting its own package directory and making its
+    subpackages importable as bare top-level names — exactly the flat namespace
+    that packaging it was meant to escape.
+    """
+
+    def install(self, spec):
+        """Build a package under the temp root and make it importable."""
+        self.tree({f"mypkg/{rel}": src for rel, src in spec.items()})
+        (self.root / "mypkg" / "__init__.py").touch()
+        return self.root
+
+    def test__submodules_are_imported_by_their_real_dotted_names(self):
+        """Verify names are `mypkg.thing`, not the bare `thing` the directory
+        scanner would produce."""
+        root = self.install({"thing.py": "X = 1\n", "sub/deep.py": "X = 2\n"})
+        with sandboxed_imports():
+            sys.path.insert(0, str(root))
+            names = [n for n, _m in sp.load_package_modules("mypkg")]
+        self.assertIn("mypkg.thing", names)
+        self.assertIn("mypkg.sub.deep", names)
+        self.assertNotIn("thing", names)
+
+    def test__sys_path_is_not_touched(self):
+        """Verify the whole point: no directory is inserted, so no bare name
+        becomes importable as a side effect."""
+        root = self.install({"thing.py": "X = 1\n"})
+        with sandboxed_imports():
+            sys.path.insert(0, str(root))
+            before = list(sys.path)
+            sp.load_package_modules("mypkg")
+            self.assertEqual(sys.path, before)
+
+    def test__it_builds_the_same_cli_as_directory_scanning(self):
+        """Verify the two loaders agree on the resulting command surface."""
+        root = self.install({"cmd.py": self.verb("Do a thing", ns="demo")})
+        with sandboxed_imports():
+            sys.path.insert(0, str(root))
+            parser = sp.setup_cli_from_package("mypkg")
+        self.assertIn("demo", parser._subparsers._group_actions[0].choices)
+
+    def test__ignore_patterns_apply_here_too(self):
+        """Verify test modules are skipped on this path as well."""
+        root = self.install({"cmd.py": "X = 1\n", "cmd_tests.py": "X = 1\n"})
+        with sandboxed_imports():
+            sys.path.insert(0, str(root))
+            names = [n for n, _m in sp.load_package_modules("mypkg")]
+        self.assertIn("mypkg.cmd", names)
+        self.assertNotIn("mypkg.cmd_tests", names)
+
+    def test__an_unimportable_package_fails_with_a_clear_message(self):
+        """Verify a typo'd PROJECT_PACKAGE says so, rather than yielding an empty CLI."""
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    sp.load_package_modules("no_such_package_xyz")
+        self.assertIn("PROJECT_PACKAGE", err.getvalue())
+
+    def test__a_broken_submodule_is_reported_not_fatal(self):
+        """Verify the same degradation as the directory scanner."""
+        root = self.install({"good.py": "X = 1\n", "bad.py": "def (\n"})
+        seen = []
+        with sandboxed_imports():
+            sys.path.insert(0, str(root))
+            names = [n for n, _m in sp.load_package_modules(
+                "mypkg", on_error=lambda n, e: seen.append(n))]
+        self.assertIn("mypkg.good", names)
+        self.assertEqual(seen, ["mypkg.bad"])
+
+
 if __name__ == "__main__":
     unittest.main()

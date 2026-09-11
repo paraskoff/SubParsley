@@ -30,12 +30,22 @@ class GenerateBaseShortNameTests(unittest.TestCase):
 class ReservedShortNameTests(unittest.TestCase):
     """Testing that -h can never be stolen from argparse"""
 
-    def test__h_initial_parameter_gets_no_short_flag(self):
-        """Verify a `host` parameter does not claim -h. add_argument('-h', ...) raises
-        at PARSER CONSTRUCTION time, so this would take down the entire CLI rather
-        than one verb."""
+    def test__an_h_initial_parameter_does_not_claim_dash_h(self):
+        """Verify a `host` parameter cannot take -h. add_argument('-h', ...) raises
+        at PARSER CONSTRUCTION time, so it would take down the entire CLI rather
+        than one verb.
+
+        It still gets a short flag — the derivation walks longer prefixes, so
+        `host` becomes -ho. The previous name for this test said "gets no short
+        flag", which was never what happened."""
         used = set(sp.RESERVED_SHORT_NAMES)
-        self.assertNotEqual(sp.generate_unique_short_name("host", used), "h")
+        self.assertEqual(sp.generate_unique_short_name("host", used), "ho")
+
+    def test__a_parameter_named_h_gets_nothing(self):
+        """Verify the one case that genuinely yields no flag: there is no longer
+        prefix to fall back to."""
+        used = set(sp.RESERVED_SHORT_NAMES)
+        self.assertIsNone(sp.generate_unique_short_name("h", used))
 
     def test__the_long_form_still_works(self):
         """Verify losing the short flag costs nothing else."""

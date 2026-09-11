@@ -3,6 +3,7 @@ import io
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 import SubParsley as sp
@@ -89,6 +90,117 @@ class FailTests(unittest.TestCase):
         with patch.dict(os.environ, {sp.DEBUG_ENV_VAR: "1"}):
             _out, err, _ = self.run_fail("boom", exc)
         self.assertLess(err.index("Error: boom"), err.index("Traceback"))
+
+
+class VersionTests(unittest.TestCase):
+    """Testing __version__ and --version"""
+
+    def test__version_is_a_dotted_number(self):
+        """Verify it parses, since the comparator splits on dots."""
+        self.assertRegex(sp.__version__, r"^\d+(\.\d+)*$")
+
+    def test__version_flag_reports_both_versions_and_the_resolved_path(self):
+        """Verify the question `--version` exists to answer: WHICH SubParsley am I
+        running. With a sibling-directory default and an installable package,
+        having two on a machine is easy."""
+        out = io.StringIO()
+        with patch.dict(os.environ, {"PROJECT_NAME": "demo", "PROJECT_VERSION": "1.2"}):
+            with redirect_stdout(out):
+                self.assertEqual(sp.main(["--version"]), 0)
+        text = out.getvalue()
+        self.assertIn("demo 1.2", text)
+        self.assertIn(sp.__version__, text)
+        self.assertIn("SubParsley.py", text)
+
+    def test__version_works_without_a_consumer_version(self):
+        """Verify a consumer that declares no version still gets output."""
+        out = io.StringIO()
+        with patch.dict(os.environ, {"PROJECT_NAME": "demo"}, clear=True):
+            with redirect_stdout(out):
+                sp.main(["--version"])
+        self.assertIn(sp.__version__, out.getvalue())
+
+
+class CheckRequirementTests(unittest.TestCase):
+    """Testing the consumer-declared compatibility gate.
+
+    The consumer declares and SubParsley checks, so every consumer gets it for
+    free and none reimplements version parsing.
+    """
+
+    def fails(self, requirement, found):
+        err = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    sp.check_requirement(requirement, found=found)
+        return err.getvalue()
+
+    def test__no_requirement_is_not_checked(self):
+        """Verify an undeclared requirement is silence, not a failure."""
+        sp.check_requirement("", found="0.3.0")
+        sp.check_requirement(None, found="0.3.0")
+
+    def test__a_satisfied_requirement_passes(self):
+        """Verify the ordinary case."""
+        sp.check_requirement(">=0.3,<0.4", found="0.3.0")
+        sp.check_requirement(">=0.2", found="0.3.0")
+
+    def test__too_old_is_refused(self):
+        """Verify a lower bound is enforced."""
+        self.assertIn("too old", self.fails(">=0.9", "0.3.0"))
+
+    def test__too_new_is_refused(self):
+        """Verify an upper bound is enforced — a consumer pinning <0.4 means it."""
+        self.assertIn("too new", self.fails(">=0.1,<0.2", "0.3.0"))
+
+    def test__the_message_names_the_resolved_path(self):
+        """Verify it says WHICH SubParsley failed, since two checkouts is the
+        normal state given the sibling-directory default."""
+        err = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True):
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    sp.check_requirement(">=9.0", found="0.3.0", source="/somewhere/SubParsley.py")
+        self.assertIn("/somewhere/SubParsley.py", err.getvalue())
+
+    def test__an_unsupported_clause_is_refused_rather_than_ignored(self):
+        """Verify `~=` or `==` fails loudly. Silently ignoring a clause would mean
+        a consumer believes it is protected when it is not."""
+        self.assertIn("Unsupported", self.fails("~=0.3", "0.3.0"))
+
+    def test__a_malformed_version_is_refused(self):
+        """Verify garbage in the requirement is caught before comparison."""
+        self.assertIn("Malformed", self.fails(">=zero", "0.3.0"))
+
+    def test__multi_digit_components_compare_numerically(self):
+        """Verify 0.10 > 0.9, which a string comparison gets wrong."""
+        sp.check_requirement(">=0.9", found="0.10.0")
+        self.assertIn("too old", self.fails(">=0.10", "0.9.0"))
+
+
+class ResolveConfigTests(unittest.TestCase):
+    """Testing the PROJECT_* contract"""
+
+    def test__an_unset_project_dir_falls_back_to_subparsleys_own_directory(self):
+        """Verify the fallback is reachable. `Path("") or fallback` never took it:
+        Path("") is Path("."), which is truthy, so an unset PROJECT_DIR silently
+        meant the current working directory."""
+        with patch.dict(os.environ, {}, clear=True):
+            project_dir, _name, _desc = sp.resolve_config()
+        self.assertEqual(project_dir, Path(sp.__file__).parent)
+
+    def test__an_empty_project_dir_also_falls_back(self):
+        """Verify an explicitly empty value is treated as unset, not as CWD."""
+        with patch.dict(os.environ, {"PROJECT_DIR": "  "}):
+            project_dir, _name, _desc = sp.resolve_config()
+        self.assertEqual(project_dir, Path(sp.__file__).parent)
+
+    def test__an_explicit_project_dir_is_used(self):
+        """Verify the ordinary case still works."""
+        with patch.dict(os.environ, {"PROJECT_DIR": "/tmp"}):
+            project_dir, _name, _desc = sp.resolve_config()
+        self.assertEqual(project_dir, Path("/tmp"))
 
 
 if __name__ == "__main__":

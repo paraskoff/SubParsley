@@ -130,11 +130,21 @@ consumer that assumes otherwise will design something that breaks.
   A consumer that re-validates or re-converts these itself is doing
   redundant work — the value SubParsley hands your function is already the
   right type.
-- **Every parameter is a single, optional, scalar flag.** There are no
-  positional arguments, no `nargs`, and no `action="append"`. A repeatable or
-  list-valued argument (`--tag foo --tag bar`) **cannot be expressed** — model
-  it instead as one delimited string (`--tags "foo,bar"`) or a path to a file,
-  and parse that yourself.
+- **There are still no positional arguments.** Every parameter is a `--flag`.
+- **A parameter's `@arg:` line may carry a bracketed spec** in first position:
+
+  ```
+  @arg: portfolio [-p] Portfolio name
+  @arg: action [-a choices=BUY|SELL] Trade action
+  @arg: tags [repeat] Repeatable; collects into a list
+  @arg: files [nargs=+] One or more values
+  ```
+
+  `choices` matching is case-insensitive and yields the declared spelling.
+  `repeat` gives `action="append"` with a fresh `[]` default per parser. An
+  unknown modifier warns rather than being silently ignored.
+- **`Enum`-annotated parameters convert to members**, with the accepted values
+  shown in `--help`. Users type the value (`BUY`), not the member name.
 - **Short flags are derived from parameter names, and order matters.**
   `generate_unique_short_name` takes the first letter of each word in the
   parameter name (`spec_path` → `sp`), and on a collision walks progressively
@@ -175,10 +185,11 @@ consumer that assumes otherwise will design something that breaks.
   `VALUE=$(yourcli something)` captures data only, and `2>/dev/null` actually
   silences complaints. The prefix and the exit code are unchanged from earlier
   versions; only the stream differs.
-- **`-h` is reserved.** A parameter whose initials would produce `h` simply
-  gets no short flag, because claiming `-h` raises at parser-construction time
-  and would take down the whole CLI. Any other short-flag conflict degrades the
-  same way, with a warning.
+- **`-h` is reserved.** A parameter whose initials would produce `h` falls
+  through to a longer prefix instead (`host` becomes `-ho`), because claiming
+  `-h` raises at parser-construction time and would take down the whole CLI.
+  A parameter literally named `h` gets no short flag at all. Any other
+  short-flag conflict degrades the same way, with a warning.
 - **A `%` in tag text is safe.** Help strings are `%`-escaped before argparse
   sees them, so `@desc: adds up to 100%` renders rather than raising
   `unsupported format character`. A side effect is that argparse's own
@@ -277,6 +288,30 @@ Now `./finj trade update --trade-id 12345 --quantity 20` will work.
 
 ## Customization
 
+### **Versioning**
+
+`__version__` in `SubParsley.py` is the single source of truth. SemVer here is
+over the **generated CLI surface**, not the Python API — renaming or rebinding a
+flag that a consumer's docstrings already produce is a breaking change, even
+though no function signature moved. That is counterintuitive and worth stating
+plainly.
+
+A consumer declares what it needs and SubParsley enforces it, so every consumer
+gets the check for free and none reimplements version parsing:
+
+```bash
+export PROJECT_REQUIRES_SUBPARSLEY=">=0.3,<0.4"
+```
+
+Only `>=X.Y[.Z]` with an optional `,<A.B[.C]` is understood; anything else is
+refused rather than ignored, because a silently-skipped clause means a consumer
+believes it is protected when it is not. Deliberately no `packaging` dependency
+— being one stdlib-only file you can copy into a project is the point.
+
+`--version` reports both versions and the resolved `SubParsley.py` path, which
+is the question you actually have when a sibling-directory default and an
+installable package can both be present.
+
 ### **Environment contract**
 The wrapper script configures SubParsley entirely through the environment;
 there are no framework-level command-line flags.
@@ -288,6 +323,10 @@ there are no framework-level command-line flags.
 | `PROJECT_DESC` | One-line description shown in `--help`. |
 | `PROJECT_IGNORE` | Extra comma/semicolon-separated fnmatch patterns to skip, **added to** the defaults. |
 | `PROJECT_IGNORE_DEFAULTS` | Set to `0` to drop the built-in ignore patterns. Rarely what you want. |
+| `PROJECT_PACKAGE` | Import dispatchers from this installed package instead of scanning a directory. Takes precedence over `PROJECT_DIR`, and touches no `sys.path`. |
+| `PROJECT_VERSION` | The consumer's own version, shown by `--version`. |
+| `PROJECT_REQUIRES_SUBPARSLEY` | e.g. `>=0.3,<0.4`. Checked before the CLI is built. |
+| `PROJECT_SHORT_FLAGS` | `auto` (default) derives short flags; `explicit` emits only those declared as `[-x]`. |
 | `SUBPARSLEY_DEBUG` | Print tracebacks and re-raise import failures. `0`/`false`/`no` count as off. |
 
 
