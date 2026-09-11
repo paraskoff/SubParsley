@@ -125,5 +125,48 @@ class BooleanFlagTests(unittest.TestCase):
         self.assertTrue(parser.parse_args(["demo", "run", "--flag"]).flag)
 
 
+
+class DyingArgumentParserTests(unittest.TestCase):
+    """Testing that a parse failure routes through the framework's error path.
+
+    Restored here when the pre-split SubParsley_tests.py was folded in — argparse
+    would otherwise print its own usage banner and exit(2), bypassing the
+    `Error: ...` / exit 1 convention every other failure uses.
+    """
+
+    def parser(self):
+        def f(count: int = 0):
+            """
+            @desc: Count things
+            @arg: count How many
+            """
+        return build(f)
+
+    def test__an_invalid_numeric_value_raises_ArgumentError(self):
+        """Verify a bad --count is raised, not exited on."""
+        with self.assertRaises(sp.ArgumentError):
+            self.parser().parse_args(["demo", "run", "--count", "abc"])
+
+    def test__an_unrecognized_flag_raises_ArgumentError(self):
+        """Verify a typo'd flag takes the same path."""
+        with self.assertRaises(sp.ArgumentError):
+            self.parser().parse_args(["demo", "run", "--nope", "1"])
+
+    def test__a_missing_required_argument_raises_ArgumentError(self):
+        """Verify a missing required value does too."""
+        def f(name: str):
+            """
+            @desc: Name a thing
+            @arg: name The name
+            """
+        with self.assertRaises(sp.ArgumentError):
+            build(f).parse_args(["demo", "run"])
+
+    def test__valid_arguments_do_not_raise(self):
+        """Verify the happy path is untouched, and the value is converted."""
+        args = self.parser().parse_args(["demo", "run", "--count", "7"])
+        self.assertEqual(args.count, 7)
+
+
 if __name__ == "__main__":
     unittest.main()

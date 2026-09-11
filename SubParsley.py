@@ -10,7 +10,9 @@ import importlib
 import inspect
 import sys
 import argparse
+import re
 import traceback
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import UnionType
@@ -146,23 +148,92 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "",
     return modules
 
 
-def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, str], Optional[str]]:
+# A bracketed spec may follow the parameter name in an `@arg:` line:
+#
+#     @arg: portfolio [-p] Portfolio name
+#     @arg: action [-a choices=BUY|SELL] Trade action
+#     @arg: set [repeat] Placeholder value as KEY=VALUE
+#
+# One extended grammar rather than a family of new tags (@short:, @choices:, ...):
+# it keeps the whole schema for an argument on one greppable line, needs no new
+# parser entry points, and degrades survivably — an OLDER SubParsley reading a
+# newer docstring renders `[-p]` as literal help text instead of crashing.
+#
+# The bracket is only special in FIRST position, so help text that happens to
+# start with a bracket later on is untouched.
+ARG_SPEC_RE = re.compile(r"^\[(?P<spec>[^\]]*)\]\s*(?P<help>.*)$", re.S)
+
+# Pipe-separated, not comma: a choice may legitimately contain a comma.
+CHOICES_SEP = "|"
+
+
+@dataclass
+class ArgSpec:
+    """ Everything an `@arg:` line declares about one parameter.
+
+        `help` is the only field the original grammar had; the rest default to
+        "unset", so a plain `@arg: name text` behaves exactly as before.
     """
-    Extract description, argument help, and custom namespace from a function's docstring.
+    help: str = ""
+    short: Optional[str] = None
+    choices: Optional[List[str]] = None
+    repeat: bool = False
+    nargs: Optional[str] = None
+
+    def __str__(self) -> str:
+        return self.help
+
+
+def _parse_arg_spec(rest: str, on_unknown: Callable[[str], None] = None) -> ArgSpec:
+    """ Split an `@arg:` line's remainder into its bracketed spec and its help.
+
+        `rest` is everything after the parameter name. Unknown modifiers are
+        reported rather than ignored — a silently-dropped `[choices=...]` would
+        look like it worked.
+    """
+    rest = rest.strip()
+    match = ARG_SPEC_RE.match(rest)
+    if not match:
+        return ArgSpec(help=rest)
+
+    spec = ArgSpec(help=match.group("help").strip())
+    for token in match.group("spec").split():
+        if token.startswith("-") and len(token) > 1:
+            spec.short = token.lstrip("-")
+        elif token.startswith("choices="):
+            spec.choices = [c for c in token[len("choices="):].split(CHOICES_SEP) if c]
+        elif token == "repeat":
+            spec.repeat = True
+        elif token.startswith("nargs="):
+            spec.nargs = token[len("nargs="):]
+        elif on_unknown:
+            on_unknown(token)
+    return spec
+
+
+def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, "ArgSpec"], Optional[str]]:
+    """
+    Extract description, argument specs, and custom namespace from a function's docstring.
 
     Args:
         func: The function to extract metadata from
 
     Returns:
-        Tuple of (description, arg_help_dict, namespace) where:
+        Tuple of (description, arg_spec_dict, namespace) where:
         - description: The description text from @desc: annotation, or None
-        - arg_help_dict: Dictionary mapping parameter names to help text from @arg: annotations
+        - arg_spec_dict: Dictionary mapping parameter names to their ArgSpec
         - namespace: The custom namespace from @ns: annotation, or None
     """
     doc = inspect.getdoc(func) or ""
     desc = None
-    arg_help = {}
+    arg_help: Dict[str, ArgSpec] = {}
     namespace = None
+
+    def unknown(token, param=None):
+        print(f"Warning: {func.__module__}.{func.__name__} @arg: {param}: "
+              f"unknown modifier {token!r}", file=sys.stderr)
+        if debug_enabled():
+            raise ValueError(f"unknown @arg modifier {token!r} on {func.__name__}")
 
     for line in doc.split("\n"):
         line = line.strip()
@@ -177,14 +248,16 @@ def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, 
             # truncated to "Render a note".
             desc = line.split(":", 1)[1].strip()
         if "@arg:" in line:
-            parts = line.split(":", 1)[1].strip().split(" ")
+            parts = line.split(":", 1)[1].strip().split(" ", 1)
             param_name = parts[0]
-            help_text = " ".join(parts[1:])
-            arg_help[param_name] = help_text
+            rest = parts[1] if len(parts) > 1 else ""
+            arg_help[param_name] = _parse_arg_spec(
+                rest, on_unknown=lambda t, p=param_name: unknown(t, p))
         if "@ns:" in line:
             namespace = line.split(":", 1)[1].strip()
 
     return desc, arg_help, namespace
+
 
 def generate_base_short_name(param_name: str) -> str:
     """
@@ -225,6 +298,22 @@ def generate_base_short_name(param_name: str) -> str:
 # (host, hours, header) would take down the entire CLI, not just one verb.
 # No current kolobar parameter produces it, which makes reserving it free.
 RESERVED_SHORT_NAMES = frozenset({"h"})
+
+SHORT_FLAGS_ENV_VAR = "PROJECT_SHORT_FLAGS"
+
+
+def _short_flags_mode() -> str:
+    """ "auto" (default) derives a short flag for every parameter, honouring any
+        explicit `[-x]`. "explicit" derives nothing — a parameter gets the short
+        flag it declares, or none.
+
+        Opt-in, because switching to "explicit" silently removes flags a
+        consumer's users may already have scripted against. The intended
+        migration is: annotate every verb with the flag it ALREADY derives, add
+        a test pinning the map, and only then switch.
+    """
+    mode = os.environ.get(SHORT_FLAGS_ENV_VAR, "auto").strip().lower()
+    return mode if mode in ("auto", "explicit") else "auto"
 
 
 def generate_unique_short_name(param_name: str, used_short_names: Set[str]) -> Optional[str]:
@@ -329,7 +418,7 @@ def create_verb_parser(
     verb_name: str,
     func: Callable,
     desc: str,
-    arg_help: Dict[str, str],
+    arg_help: Dict[str, "ArgSpec"],
     module_name: str
 ) -> Any:
     """
@@ -356,20 +445,63 @@ def create_verb_parser(
     sig = inspect.signature(func)
     used_short_names: Set[str] = set(RESERVED_SHORT_NAMES)
 
+    # Claim every EXPLICIT short flag up front. Derivation walks parameters in
+    # declaration order and takes the first free initial, so a derived flag
+    # could otherwise steal a letter that a later parameter had annotated —
+    # which is exactly the order-dependence explicit flags exist to remove.
+    explicit: Dict[str, str] = {}
+    for name, spec in (arg_help or {}).items():
+        if getattr(spec, "short", None):
+            if spec.short in explicit.values():
+                fail(f"{module_name} {verb_name}: two parameters both declare "
+                     f"-{spec.short}")
+            explicit[name] = spec.short
+            used_short_names.add(spec.short)
+
     for param_name, param in sig.parameters.items():
         if param_name == "self":
             continue
 
         long_name = f"--{param_name.replace('_', '-')}"
-        short_name = generate_unique_short_name(param_name, used_short_names)
+        spec = (arg_help or {}).get(param_name)
+        # Tolerate the pre-ArgSpec contract, where arg_help mapped a name to a
+        # bare help string. extract_function_metadata never produces that now,
+        # but a caller assembling arg_help by hand reasonably might.
+        if isinstance(spec, str):
+            spec = ArgSpec(help=spec)
+        if param_name in explicit:
+            short_name = explicit[param_name]
+        elif _short_flags_mode() == "explicit":
+            # Nothing is derived: a parameter has the short flag it declares, or
+            # none. Opt-in, because turning derivation off silently removes
+            # flags a consumer's users may have scripted against.
+            short_name = None
+        else:
+            short_name = generate_unique_short_name(param_name, used_short_names)
 
+        help_text = spec.help if spec is not None and spec.help else None
         kwargs = {
             "dest": param_name,
-            "help": escape_help(arg_help.get(param_name, f"{param_name} for {module_name}")),
+            "help": escape_help(help_text or f"{param_name} for {module_name}"),
         }
+        if spec is not None:
+            if spec.repeat and spec.nargs:
+                fail(f"{module_name} {verb_name} --{param_name}: `repeat` and "
+                     f"`nargs` cannot be combined")
+            if spec.repeat:
+                kwargs["action"] = "append"
+            if spec.nargs:
+                kwargs["nargs"] = int(spec.nargs) if spec.nargs.isdigit() else spec.nargs
+            if spec.choices:
+                kwargs["choices"] = spec.choices
 
         if param.default is not inspect.Parameter.empty:
-            kwargs["default"] = param.default
+            # A repeated flag collects into a list, so an unset one must be an
+            # empty list rather than the scalar default the signature declares.
+            # Built here, per parser, so two parsers never share one mutable.
+            kwargs["default"] = ([] if kwargs.get("action") == "append"
+                                 and param.default in (None, "")
+                                 else param.default)
         else:
             kwargs["required"] = True
 
@@ -377,6 +509,10 @@ def create_verb_parser(
             type_converter = _get_type_converter(param.annotation)
             if type_converter:
                 kwargs["type"] = type_converter
+                if kwargs.get("choices"):
+                    # argparse compares the CONVERTED value against choices, so
+                    # `choices=1|2` on an int parameter must hold ints, not "1".
+                    kwargs["choices"] = [type_converter(c) for c in kwargs["choices"]]
             elif _unwrap_optional(param.annotation) is bool:
                 # BooleanOptionalAction, not store_true: store_true can only ever
                 # turn a flag ON, so a bool parameter DEFAULTING TO True had no way
