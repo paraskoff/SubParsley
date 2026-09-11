@@ -1,1 +1,11 @@
 __pycache__/
+*.py[co]
+.coverage
+htmlcov/
+venv/
+.venv/
+
+# Build artefacts from `pip install .` / `pip install -e .`
+build/
+dist/
+*.egg-info/

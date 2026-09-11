@@ -1,8 +1,0 @@
-LICENSE
-README.md
-SubParsley.py
-pyproject.toml
-subparsley.egg-info/PKG-INFO
-subparsley.egg-info/SOURCES.txt
-subparsley.egg-info/dependency_links.txt
-subparsley.egg-info/top_level.txt
