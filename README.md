@@ -1,13 +1,13 @@
 # 🌿 SubParsley
 > **A lightweight, extensible, and reusable CLI framework for Python projects**
 
-This framework allows you to dynamically register commands as **verb-noun pairs** (e.g., `finj trade add`) by scanning Python modules in a project-specific `modules/` directory. It uses `argparse` subparsers for automatic command wiring and argument parsing.
+This framework allows you to dynamically register commands as **verb-noun pairs** (e.g., `finj trade add`) by scanning the Python modules under the project directory named by `$PROJECT_DIR`. It uses `argparse` subparsers for automatic command wiring and argument parsing.
 
 ---
 
 ## **Features**
 - ✅ **Reusable**: Use the same `SubParsley.py` across multiple projects (e.g., `finj`).
-- ✅ **Dynamic Module Loading**: Automatically loads modules from a project-specific `modules/` directory.
+- ✅ **Dynamic Module Loading**: Recursively loads modules from `$PROJECT_DIR`, skipping test files.
 - ✅ **Automatic Command Wiring**: Commands are auto-registered based on Python modules and methods.
 - ✅ **Self-Documenting**: Auto-generates help messages from docstrings.
 - ✅ **Extensible**: Add new commands by simply adding methods to modules.
@@ -20,12 +20,13 @@ This framework allows you to dynamically register commands as **verb-noun pairs*
 SubParsley/
 └── SubParsley.py            # Shared CLI dispatcher
 
-<project_name>_project/
-├── <project_name>           # Wrapper script (e.g., finj)
-└── modules/                 # Project-specific modules
-├── trade.py                 # Example module
+<project_name>_project/          # this whole directory is $PROJECT_DIR
+├── <project_name>               # Wrapper script (e.g., finj)
+├── trade.py                     # Example module — dispatchers live at the ROOT
 ├── portfolio.py
-└── ...
+└── views/                       # Subpackages are recursed into if they
+    ├── __init__.py              #   contain an __init__.py
+    └── ...
 ```
 
 ---
@@ -56,10 +57,10 @@ chmod +x finj
 ```
 
 ### 3. Project-Specific Modules
-Create a `modules/` directory in your project and add Python modules (e.g., `trade.py`, `portfolio.py`).
+Add Python modules at the root of your project directory (e.g., `trade.py`, `portfolio.py`). Subdirectories containing an `__init__.py` are recursed into.
 Each module defines **commands** (methods) for its **noun** (module name).
 
-#### Example: `modules/trade.py`
+#### Example: `trade.py`
 ```python
 def add(symbol: str, quantity: int, price: float = 0.0):
     """
@@ -82,7 +83,7 @@ def close(trade_id: str, force: bool = False):
         print(f"Closing trade: {trade_id}")
 ```
 
-#### Example: `modules/portfolio.py`
+#### Example: `portfolio.py`
 ```python
 def sync():
     """
@@ -158,8 +159,30 @@ consumer that assumes otherwise will design something that breaks.
   directory, then recurses into a subdirectory **only if it contains an
   `__init__.py` and its name does not start with `_`**. A new subpackage with
   no `__init__.py` registers nothing, silently. A module that raises on import
-  is skipped with a bare `print(e)` and the CLI continues without it — check
-  your terminal output if a command you just added does not appear.
+  is skipped with a `Warning: skipping module '<name>': <Type>: <message>` on
+  **stderr**, and the CLI continues without it. Set `SUBPARSLEY_DEBUG=1` to
+  re-raise instead of skipping.
+- **Test modules are never imported.** `*_test*.py`, `tests.py`, `conftest.py`
+  and `setup.py` are skipped by default, in both file and directory position.
+  They contribute no verbs, and importing them on every CLI invocation was pure
+  startup cost — 45% of kolobar's `.py` files, plus `unittest` itself. Add more
+  patterns with `$PROJECT_IGNORE`.
+- **Only the project root goes on `sys.path`.** Modules are imported by their
+  dotted package name. Two modules with the same base name at different depths
+  (`schema.py`, `models/schema.py`) therefore both load correctly and neither
+  shadows the other.
+- **Errors go to stderr and exit 1.** `Error: ...` is written to stderr, so
+  `VALUE=$(yourcli something)` captures data only, and `2>/dev/null` actually
+  silences complaints. The prefix and the exit code are unchanged from earlier
+  versions; only the stream differs.
+- **`-h` is reserved.** A parameter whose initials would produce `h` simply
+  gets no short flag, because claiming `-h` raises at parser-construction time
+  and would take down the whole CLI. Any other short-flag conflict degrades the
+  same way, with a warning.
+- **A `%` in tag text is safe.** Help strings are `%`-escaped before argparse
+  sees them, so `@desc: adds up to 100%` renders rather than raising
+  `unsupported format character`. A side effect is that argparse's own
+  `%(default)s` interpolation is not available in docstring text.
 
 
 ### Usage Examples
@@ -226,7 +249,7 @@ Forcibly closing trade: 12345
 
 ### Adding New Commands
 
-#### **Add a new module** (e.g., `modules/inbox.py`):
+#### **Add a new module** (e.g., `inbox.py`):
 ```python
 def process():
     """
@@ -238,7 +261,7 @@ def process():
 Now `./finj inbox process` will work automatically.
 
 
-#### **Add a new method to an existing module** (e.g., `modules/trade.py`):
+#### **Add a new method to an existing module** (e.g., `trade.py`):
 ```python
 def update(trade_id: str, quantity: int):
     """
@@ -254,23 +277,31 @@ Now `./finj trade update --trade-id 12345 --quantity 20` will work.
 
 ## Customization
 
-### **Change the Modules Directory**
-By default, `SubParsley.py` looks for modules in `<project_root>/modules/`.
-To use a custom directory, modify the wrapper script to pass the correct path:
-```bash
-python3 /path/to/shared/SubParsley.py finj --modules-dir /custom/path "\$@"
-```
+### **Environment contract**
+The wrapper script configures SubParsley entirely through the environment;
+there are no framework-level command-line flags.
 
-Then update `SubParsley.py` to handle the `--modules-dir` argument.
+| Variable | Meaning |
+|---|---|
+| `PROJECT_DIR` | Directory to scan for dispatcher modules. Defaults to SubParsley's own directory. |
+| `PROJECT_NAME` | Program name shown in usage. |
+| `PROJECT_DESC` | One-line description shown in `--help`. |
+| `PROJECT_IGNORE` | Extra comma/semicolon-separated fnmatch patterns to skip, **added to** the defaults. |
+| `PROJECT_IGNORE_DEFAULTS` | Set to `0` to drop the built-in ignore patterns. Rarely what you want. |
+| `SUBPARSLEY_DEBUG` | Print tracebacks and re-raise import failures. `0`/`false`/`no` count as off. |
 
 
 ## Troubleshooting
 
-- **Error: Modules directory not found**:
-Ensure the `modules/` directory exists in your project and the wrapper script passes the correct project name.
+- **Error: Project directory not found**:
+Ensure `$PROJECT_DIR` points at an existing directory.
+
+- **A command you just added does not appear**: its module probably failed to
+import. SubParsley prints `Warning: skipping module '<name>': ...` to stderr
+and carries on. Set `SUBPARSLEY_DEBUG=1` to get the traceback instead.
 
 - **Error: Unknown command**:
-Check that the module and method names are correct and that the module is in the `modules/` directory.
+Check that the module and method names are correct and that the module is inside `$PROJECT_DIR` (and, if nested, that every parent directory has an `__init__.py`).
 
 - **Error: Missing arguments**:
 Ensure required arguments are provided. Use `--help` to see the expected arguments for a command.
