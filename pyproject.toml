@@ -1,0 +1,32 @@
+# Minimal, deliberately. This exists so a consumer can declare SubParsley as a
+# real dependency instead of locating it with $SUBPARSLEY_HOME and a relative
+# path — nothing more.
+#
+# Versioning proper (a `__version__`, a `--version` flag, and the
+# PROJECT_REQUIRES_SUBPARSLEY compatibility gate) is a separate piece of work.
+# Until it lands there is no version to check, so `version` here is a
+# placeholder and consumers must not depend on it.
+#
+# Installation stays OPTIONAL. SubParsley is one file with no dependencies, and
+# being copyable into a project is a real feature; this only adds the option of
+# `pip install -e ../SubParsley`.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subparsley"
+version = "0.0.0"
+description = "A lightweight, reusable CLI framework driven by docstring annotations"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Ivan Paraskov" }]
+# Matches its only consumer. Nothing here needs 3.12 specifically, but there is
+# no reason to claim support that is never exercised.
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools]
+# A single module, not a package.
+py-modules = ["SubParsley"]
