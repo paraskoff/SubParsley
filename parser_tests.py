@@ -162,6 +162,38 @@ class DyingArgumentParserTests(unittest.TestCase):
         with self.assertRaises(sp.ArgumentError):
             build(f).parse_args(["demo", "run"])
 
+    def test__a_missing_noun_carries_the_top_level_parser(self):
+        """Verify the error carries the parser that actually raised it — here
+        the top-level one, so a caller can show `prog -h`."""
+        parser = self.parser()
+        with self.assertRaises(sp.ArgumentError) as cm:
+            parser.parse_args([])
+        self.assertIs(cm.exception.parser, parser)
+
+    def test__a_missing_verb_carries_the_noun_level_parser(self):
+        """Verify a missing verb carries the NOUN parser, not the top-level
+        one, so a caller can show `prog <noun> -h`."""
+        parser = self.parser()
+        with self.assertRaises(sp.ArgumentError) as cm:
+            parser.parse_args(["demo"])
+        noun_parser = parser._subparsers._group_actions[0].choices["demo"]
+        self.assertIs(cm.exception.parser, noun_parser)
+
+    def test__a_missing_argument_carries_the_verb_level_parser(self):
+        """Verify a missing required argument carries the VERB parser, so a
+        caller can show `prog <noun> <verb> -h`."""
+        def f(name: str):
+            """
+            @desc: Name a thing
+            @arg: name The name
+            """
+        parser = build(f)
+        with self.assertRaises(sp.ArgumentError) as cm:
+            parser.parse_args(["demo", "run"])
+        noun_parser = parser._subparsers._group_actions[0].choices["demo"]
+        verb_parser = noun_parser._subparsers._group_actions[0].choices["run"]
+        self.assertIs(cm.exception.parser, verb_parser)
+
     def test__valid_arguments_do_not_raise(self):
         """Verify the happy path is untouched, and the value is converted."""
         args = self.parser().parse_args(["demo", "run", "--count", "7"])

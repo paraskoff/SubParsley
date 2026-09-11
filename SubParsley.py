@@ -707,7 +707,17 @@ def create_noun_parser(
 class ArgumentError(Exception):
     """Raised instead of argparse's own sys.exit(2) on a parse failure, so
     main() can report it through the same `Error: ...` / exit(1) path as every
-    other failure in this framework."""
+    other failure in this framework.
+
+    Carries the parser that actually raised it — the top-level parser for a
+    missing noun, the noun parser for a missing verb, or the verb parser for a
+    missing/invalid argument — so main() can show that parser's own help
+    alongside the message instead of leaving the user to guess `-h`.
+    """
+
+    def __init__(self, message: str, parser: "DyingArgumentParser" = None):
+        super().__init__(message)
+        self.parser = parser
 
 
 class DyingArgumentParser(argparse.ArgumentParser):
@@ -717,7 +727,7 @@ class DyingArgumentParser(argparse.ArgumentParser):
     entirely; this routes it through the same one."""
 
     def error(self, message):
-        raise ArgumentError(message)
+        raise ArgumentError(message, self)
 
 
 def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsley - Extensible CLI Tool") -> Any:
@@ -785,6 +795,25 @@ def fail(message: str, exc: BaseException = None):
     print(f"Error: {message}", file=sys.stderr)
     if exc is not None and debug_enabled():
         traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    sys.exit(1)
+
+
+def fail_with_usage(message: str, parser: Optional["DyingArgumentParser"]):
+    """ Like fail(), but for a bad CLI invocation: shows the message and then
+        the HELP OF THE PARSER THAT ACTUALLY RAISED IT.
+
+        That parser is already scoped exactly right, for free, by argparse's
+        own subcommand tree: the top-level parser errors on a missing noun,
+        the noun's own subparser errors on a missing verb, and the verb's own
+        subparser errors on a missing/invalid argument. So printing `parser`'s
+        help here is `./klbr -h`, `./klbr <noun> -h` or `./klbr <noun> <verb>
+        -h` respectively — the user is shown exactly the command they need,
+        without main() having to know which level failed.
+    """
+    print(f"Error: {message}", file=sys.stderr)
+    if parser is not None:
+        print("", file=sys.stderr)
+        parser.print_help(sys.stderr)
     sys.exit(1)
 
 
@@ -944,6 +973,11 @@ def main(argv: List[str] = None):
         # These are used for CLI routing, not as function arguments
         func_args = {k: v for k, v in vars(args).items() if k not in ('noun', 'verb', 'func')}
         return args.func(**func_args)
+    except ArgumentError as e:
+        # A bad invocation, not a runtime failure: show the offending
+        # parser's own help (top-level/noun/verb, whichever raised) rather
+        # than the generic traceback path below.
+        fail_with_usage(str(e), e.parser)
     except Exception as e:
         fail(str(e), e)
 

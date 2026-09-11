@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import SubParsley as sp
+from tests import ModuleTreeTestCase
 
 
 class DebugEnabledTests(unittest.TestCase):
@@ -90,6 +91,47 @@ class FailTests(unittest.TestCase):
         with patch.dict(os.environ, {sp.DEBUG_ENV_VAR: "1"}):
             _out, err, _ = self.run_fail("boom", exc)
         self.assertLess(err.index("Error: boom"), err.index("Traceback"))
+
+
+class FailWithUsageTests(unittest.TestCase):
+    """Testing fail_with_usage()"""
+
+    def run_fail(self, *args, **kwargs):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                sp.fail_with_usage(*args, **kwargs)
+        return out.getvalue(), err.getvalue(), cm.exception.code
+
+    def test__message_and_help_both_go_to_stderr(self):
+        """Verify the error and the parser's own help print together, so a bad
+        invocation is not left to guess `-h` for itself."""
+        parser = sp.DyingArgumentParser(prog="demo")
+        parser.add_argument("--flag")
+        out, err, _ = self.run_fail("boom", parser)
+        self.assertEqual(out, "")
+        self.assertIn("Error: boom", err)
+        self.assertIn("usage: demo", err)
+        self.assertIn("--flag", err)
+
+    def test__the_message_precedes_the_help(self):
+        """Verify the readable one-liner is not buried under the usage text."""
+        parser = sp.DyingArgumentParser(prog="demo")
+        _out, err, _ = self.run_fail("boom", parser)
+        self.assertLess(err.index("Error: boom"), err.index("usage:"))
+
+    def test__exit_code_is_one(self):
+        """Verify a bad invocation exits the same way every other failure does."""
+        parser = sp.DyingArgumentParser(prog="demo")
+        _out, _err, code = self.run_fail("boom", parser)
+        self.assertEqual(code, 1)
+
+    def test__no_parser_still_reports_the_message(self):
+        """Verify a caller that has no parser to show (defensive: every real
+        ArgumentError carries one) still reports the error rather than crashing."""
+        out, err, _ = self.run_fail("boom", None)
+        self.assertEqual(out, "")
+        self.assertIn("Error: boom", err)
 
 
 class VersionTests(unittest.TestCase):
@@ -189,6 +231,53 @@ class ResolveConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             project_dir, _name, _desc = sp.resolve_config()
         self.assertEqual(project_dir, Path(sp.__file__).parent)
+
+
+class MainArgumentErrorTests(ModuleTreeTestCase):
+    """Testing that main() shows the RIGHT LEVEL of help on a bad invocation:
+    top-level for a missing noun, the noun's for a missing verb, the verb's
+    for a missing/invalid argument."""
+
+    def setUp(self):
+        super().setUp()
+        self.tree({
+            "demo.py": self.verb("Do a thing", ns="demo",
+                                 args={"name": "The name"}, params="name: str"),
+        })
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        env = {"PROJECT_DIR": str(self.root), "PROJECT_NAME": "prog"}
+        with patch.dict(os.environ, env, clear=True):
+            with redirect_stdout(out), redirect_stderr(err):
+                with self.assertRaises(SystemExit) as cm:
+                    sp.main(argv)
+        return out.getvalue(), err.getvalue(), cm.exception.code
+
+    def test__no_arguments_shows_the_top_level_help(self):
+        """Verify `prog` alone shows the same help `prog -h` would."""
+        _out, err, code = self.run_main([])
+        self.assertEqual(code, 1)
+        self.assertIn("Error: the following arguments are required: noun", err)
+        self.assertIn("usage: prog", err)
+        self.assertIn("demo", err)  # the noun is listed as a choice
+
+    def test__a_missing_verb_shows_the_noun_level_help(self):
+        """Verify `prog demo` shows the same help `prog demo -h` would, not the
+        top-level one."""
+        _out, err, code = self.run_main(["demo"])
+        self.assertEqual(code, 1)
+        self.assertIn("Error: the following arguments are required: verb", err)
+        self.assertIn("usage: prog demo", err)
+        self.assertIn("run", err)  # the verb is listed as a choice
+
+    def test__a_missing_argument_shows_the_verb_level_help(self):
+        """Verify `prog demo run` shows the same help `prog demo run -h`
+        would, naming the missing flag rather than the noun/verb choices."""
+        _out, err, code = self.run_main(["demo", "run"])
+        self.assertEqual(code, 1)
+        self.assertIn("--name", err)
+        self.assertIn("usage: prog demo run", err)
 
     def test__an_empty_project_dir_also_falls_back(self):
         """Verify an explicitly empty value is treated as unset, not as CWD."""
