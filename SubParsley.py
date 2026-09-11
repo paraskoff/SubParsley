@@ -5,31 +5,107 @@
 """
 
 import os
+import fnmatch
 import importlib
 import inspect
 import sys
 import argparse
 import traceback
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any, Callable, Set
+from typing import Dict, List, Sequence, Tuple, Optional, Any, Callable, Set
 
-def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[Tuple[str, Any]]:
+# Never imported as dispatcher modules. Test code contributes no verbs, and in
+# kolobar it is 55 of 122 .py files — 45% of every import on every CLI
+# invocation, plus unittest itself, before argparse is even constructed. Worse,
+# any module-level side effect in a test file would run during a user's
+# ordinary command.
+DEFAULT_IGNORE = ("*_test*.py", "tests.py", "conftest.py", "setup.py")
+
+IGNORE_ENV_VAR = "PROJECT_IGNORE"
+IGNORE_DEFAULTS_ENV_VAR = "PROJECT_IGNORE_DEFAULTS"
+
+
+def resolve_ignore_patterns() -> Tuple[str, ...]:
+    """ DEFAULT_IGNORE plus anything in $PROJECT_IGNORE (comma or semicolon
+        separated).
+
+        ADDITIVE by default, and opting out of the defaults takes a separate
+        explicit `PROJECT_IGNORE_DEFAULTS=0`. An accidental full override would
+        silently reintroduce the very defect this exists to fix, and it costs
+        latency rather than correctness — so it would never be noticed. The
+        dangerous choice has to be the loud one.
+    """
+    extra = os.environ.get(IGNORE_ENV_VAR, "").replace(";", ",")
+    patterns = [p.strip() for p in extra.split(",") if p.strip()]
+    if os.environ.get(IGNORE_DEFAULTS_ENV_VAR, "").strip().lower() in _FALSEY - {""}:
+        return tuple(patterns)
+    return DEFAULT_IGNORE + tuple(patterns)
+
+
+def _is_ignored(path: Path, root: Path, patterns: Sequence[str]) -> bool:
+    """Matches the bare name AND the root-relative path, so both `*_test*.py`
+       and `ext/legacy/*` work."""
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        relative = path.name
+    return any(fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative, pattern)
+               for pattern in patterns)
+
+
+def warn_import_failure(module_name: str, exc: BaseException):
+    """ Default `on_error`: name the module that failed and why.
+
+        The previous handler was a bare `print(e)` followed by `continue`, so a
+        syntax error in one dispatcher silently deleted that entire namespace
+        from the CLI, leaving an unlabelled stray line as the only clue.
+    """
+    print(f"Warning: skipping module '{module_name}': {type(exc).__name__}: {exc}",
+          file=sys.stderr)
+
+
+def load_modules_recursive(modules_dir: Path, parent_module: str = "",
+                           ignore: Sequence[str] = None,
+                           on_error: Callable[[str, BaseException], None] = None,
+                           root: Path = None) -> List[Tuple[str, Any]]:
     """
     Recursively load all Python modules from the specified directory and its subdirectories.
+
+    Only the PROJECT ROOT goes on sys.path, once. Every module is then imported
+    by the dotted name computed here. Inserting each subdirectory too (as this
+    used to) is a shadowing hazard with no compensating function: kolobar has
+    schema.py at five different levels, plus note/backup/template/moc/prompt
+    duplicated across layers, and nothing broke only because the root modules
+    happened to import first and win the sys.modules cache.
 
     Args:
         modules_dir: Path to the directory containing module files
         parent_module: Parent module name for nested modules (e.g., "subdir" for "subdir.module")
+        ignore: fnmatch patterns to skip; defaults to resolve_ignore_patterns()
+        on_error: called with (module_name, exception) when an import fails
+        root: the project root, for relative-path matching and sys.path (internal)
 
     Returns:
         List of tuples containing (module_name, module_object) for successfully loaded modules
     """
-    sys.path.insert(0, str(modules_dir))
+    if ignore is None:
+        ignore = resolve_ignore_patterns()
+    if on_error is None:
+        on_error = warn_import_failure
+    if root is None:
+        root = modules_dir
+        # Once, at the top-level call only. Index 0 so the consumer's own
+        # modules win over anything ambient.
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+
     modules = []
 
     # Load modules from current directory
-    for module_file in modules_dir.glob("*.py"):
+    for module_file in sorted(modules_dir.glob("*.py")):
         if module_file.name == "__init__.py":
+            continue
+        if _is_ignored(module_file, root, ignore):
             continue
         module_name = module_file.stem
         # Use parent_module prefix for nested modules
@@ -38,20 +114,28 @@ def load_modules_recursive(modules_dir: Path, parent_module: str = "") -> List[T
             module = importlib.import_module(full_module_name)
             modules.append((full_module_name, module))
         except Exception as e:
-            print(e)
+            # Deliberately not BaseException: a module calling sys.exit() at
+            # import time raises SystemExit, and swallowing that turned a hard
+            # failure into a missing namespace.
+            on_error(full_module_name, e)
+            if debug_enabled():
+                raise
             continue
 
     # Recursively load modules from subdirectories
-    for subdir in modules_dir.iterdir():
+    for subdir in sorted(modules_dir.iterdir()):
         if subdir.is_dir() and not subdir.name.startswith("_"):
+            if _is_ignored(subdir, root, ignore):
+                continue
             init_file = subdir / "__init__.py"
             if init_file.exists():
                 sub_module_name = subdir.name
                 full_parent = f"{parent_module}.{sub_module_name}" if parent_module else sub_module_name
-                submodules = load_modules_recursive(subdir, full_parent)
+                submodules = load_modules_recursive(subdir, full_parent, ignore, on_error, root)
                 modules.extend(submodules)
 
     return modules
+
 
 def extract_function_metadata(func: Callable) -> Tuple[Optional[str], Dict[str, str], Optional[str]]:
     """
