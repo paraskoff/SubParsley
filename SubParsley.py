@@ -9,6 +9,7 @@ import importlib
 import inspect
 import sys
 import argparse
+import traceback
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Callable, Set
 
@@ -191,6 +192,32 @@ def get_valid_verbs(
 
     return verbs
 
+def escape_help(text: str) -> str:
+    """ Escape `%` for argparse's help formatter.
+
+        argparse %-expands the `help=` string when it renders it, so a single
+        `%` in consumer-supplied text raises at FORMAT time and takes down the
+        whole namespace's help. kolobar's
+        `@desc: ...adds up to 100% with no over-allocated sleeve` made
+        `klbr allocation --help` die with
+
+            unsupported format character 'w' (0x77) at index 49
+
+        and rendered all five of that noun's verbs undiscoverable. The same
+        applies to `@arg:` text, which fails differently and even less legibly
+        (`TypeError: %d format: a real number is required, not dict`).
+
+        Deliberately NOT applied to `description=`, which argparse does not
+        expand — escaping there would print a literal `100%%` to the user.
+
+        A consequence worth stating: this also neutralises argparse's own
+        interpolation vocabulary (`%(default)s`). That is intended. A docstring
+        is prose written by a consumer, not a format string, and reaching
+        argparse internals through it by accident is the bug, not a feature.
+    """
+    return text.replace("%", "%%") if text else text
+
+
 def create_verb_parser(
     noun_subparsers: Any,
     verb_name: str,
@@ -215,7 +242,7 @@ def create_verb_parser(
     """
     verb_parser = noun_subparsers.add_parser(
         verb_name,
-        help=desc or f"{verb_name} {module_name}",
+        help=escape_help(desc or f"{verb_name} {module_name}"),
         description=desc,
     )
 
@@ -232,7 +259,7 @@ def create_verb_parser(
 
         kwargs = {
             "dest": param_name,
-            "help": arg_help.get(param_name, f"{param_name} for {module_name}"),
+            "help": escape_help(arg_help.get(param_name, f"{param_name} for {module_name}")),
         }
 
         if param.default is not inspect.Parameter.empty:
@@ -294,7 +321,7 @@ def create_noun_parser(
     """
     noun_parser = subparsers.add_parser(
         noun_name,
-        help=f"Commands for {noun_name}",
+        help=escape_help(f"Commands for {noun_name}"),
     )
 
     noun_subparsers = noun_parser.add_subparsers(
@@ -359,30 +386,62 @@ def setup_cli(modules_dir: Path, name: str = "SubParsley", desc: str = "SubParsl
 
     return parser
 
-def main():
-    # --- Determine the modules directory ---
+DEBUG_ENV_VAR = "SUBPARSLEY_DEBUG"
+# Anything else non-empty is on. These four are spelled out because
+# `SUBPARSLEY_DEBUG=0` obviously means "off" to a human, and a bare truthiness
+# check would turn it on.
+_FALSEY = {"", "0", "false", "no"}
+
+
+def debug_enabled() -> bool:
+    """Whether to surface tracebacks and re-raise swallowed import errors."""
+    return os.environ.get(DEBUG_ENV_VAR, "").strip().lower() not in _FALSEY
+
+
+def fail(message: str, exc: BaseException = None):
+    """ Report a fatal error and exit 1.
+
+        STDERR, not stdout: errors used to go to stdout, so
+        `SBOR=$(klbr sbor show --brief)` captured error text as data and
+        `klbr ... 2>/dev/null` hid nothing. The `Error: ` prefix and the exit
+        code are unchanged — the stream is the only difference.
+
+        The one-line message is printed BEFORE any traceback so the readable
+        part is not buried under a stack.
+    """
+    print(f"Error: {message}", file=sys.stderr)
+    if exc is not None and debug_enabled():
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    sys.exit(1)
+
+
+def resolve_config() -> Tuple[Path, str, str]:
+    """Reads the PROJECT_* environment contract. Separated from main() so tests
+       can drive main(argv=...) without reaching into os.environ."""
     project_dir = Path(os.environ.get('PROJECT_DIR', '')) or Path(__file__).parent
     project_name = os.environ.get('PROJECT_NAME', "SubParsley")
     project_desc = os.environ.get('PROJECT_DESC', "SubParsley - Extensible CLI Tool")
+    return project_dir, project_name, project_desc
 
-    # Ensure the modules directory exists
+
+def main(argv: List[str] = None):
+    project_dir, project_name, project_desc = resolve_config()
+
     if not project_dir.exists():
-        print(f"Error: Project directory not found: {project_dir}")
-        sys.exit(1)
+        fail(f"Project directory not found: {project_dir}")
 
-    # --- Set up and run the CLI ---
     parser = setup_cli(project_dir, project_name, project_desc)
     try:
         # parse_args() is inside the try too: a missing/invalid argument must
         # exit 1 through this same message, not argparse's own exit(2).
-        args = parser.parse_args()
+        args = parser.parse_args(argv)
         # Filter out 'noun' and 'verb' from args before passing to the function
         # These are used for CLI routing, not as function arguments
         func_args = {k: v for k, v in vars(args).items() if k not in ('noun', 'verb', 'func')}
-        args.func(**func_args)
+        return args.func(**func_args)
     except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        fail(str(e), e)
+
 
 if __name__ == "__main__":
     main()
