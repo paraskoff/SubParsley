@@ -27,7 +27,9 @@ echo "======================================================================"
 COVERAGE_OMIT="*_test*.py,tests.py"
 
 if $PYTHON_BIN -c "import coverage" >/dev/null 2>&1; then
-  $PYTHON_BIN -m coverage run --branch --omit "$COVERAGE_OMIT" -m unittest discover -s "$TEST_DIR" -p "$TEST_PATTERN" -v
+  # --source=. keeps the throwaway module trees the loader tests build under
+  # /tmp out of the report; without it coverage aborts with "No source for code".
+  $PYTHON_BIN -m coverage run --branch --source=. --omit "$COVERAGE_OMIT" -m unittest discover -s "$TEST_DIR" -p "$TEST_PATTERN" -v
   $PYTHON_BIN -m coverage report -m --omit "$COVERAGE_OMIT"
 else
   $PYTHON_BIN -m unittest discover -s "$TEST_DIR" -p "$TEST_PATTERN" -v
